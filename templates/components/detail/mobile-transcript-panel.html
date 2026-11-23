@@ -1,0 +1,184 @@
+<!-- The transcript tab of a recording on a phone.
+
+     Its first child is the pinned bar (.ph-tbar, position: sticky): the
+     Transcription / Translation switch, find, copy and follow playback stay
+     under the top bar while the transcript scrolls, in the one scrolling
+     area of the recording (.ph-scroll, components/detail-view.html). The
+     transcript below it is the windowed list of
+     composables/transcript-view.js, which takes its scrolling element from
+     the page, so the list needs no scrolling area of its own.
+     Bubble view, download, edit and translate are in Actions
+     (components/phone/recording-sheets.html). -->
+{% from 'components/phone/_empty.html' import phone_empty %}
+<div v-if="mobileTab === 'transcript'" class="ph-pane ph-pane--transcript" :class="{ 'has-find': transcriptFind.open }" data-phone-pane="transcript">
+    <div class="ph-tbar" data-phone-transcript-bar>
+        <div class="ph-tbar__main">
+            <div v-if="!selectedRecording.incognito" class="ph-seg" role="group" :aria-label="t('phone.textShown')" data-phone-switch>
+                <button type="button" data-phone-switch-option="transcription" @click="viewingTranslation = false"
+                        :aria-pressed="viewingTranslation ? 'false' : 'true'" v-text="t('transcription.title')"></button>
+                <button type="button" data-phone-switch-option="translation" @click="viewingTranslation = true"
+                        :aria-pressed="viewingTranslation ? 'true' : 'false'" v-text="t('translation.title')"></button>
+            </div>
+            <span v-else class="ph-tbar__title" v-text="t('transcription.title')"></span>
+            <button v-if="processedTranscription.simpleSegments && processedTranscription.simpleSegments.length > 0 && !processedTranscription.isError"
+                    type="button" class="ph-ib ph-toggle" data-phone-find @click="toggleTranscriptFind"
+                    :aria-pressed="transcriptFind.open ? 'true' : 'false'"
+                    :aria-label="t('findReplace.find')" :title="t('findReplace.find')">
+                <i class="fas fa-search" aria-hidden="true"></i>
+            </button>
+            <button v-if="selectedRecording.transcription" type="button" class="ph-ib" data-phone-copy @click="copyTranscription"
+                    :aria-label="t('tooltips.copyTranscript')" :title="t('tooltips.copyTranscript')">
+                <i class="fas fa-copy" aria-hidden="true"></i>
+            </button>
+            <button v-if="processedTranscription.isJson && processedTranscription.hasDialogue"
+                    type="button" class="ph-ib ph-toggle" data-phone-follow @click="toggleFollowPlayerMode"
+                    :aria-pressed="followPlayerMode ? 'true' : 'false'"
+                    :aria-label="followPlayerMode ? t('tooltips.followPlayerEnabled') : t('tooltips.followPlayerDisabled')"
+                    :title="followPlayerMode ? t('tooltips.followPlayerEnabled') : t('tooltips.followPlayerDisabled')">
+                <i class="fas fa-arrows-alt-v" aria-hidden="true"></i>
+            </button>
+        </div>
+        {% include 'components/detail/_transcript-find.html' %}
+    </div>
+    <div class="ph-pane__body ph-pane__body--transcript relative">
+        <!-- Floating Processing Indicator (Mobile) -->
+        <div v-if="selectedRecording.status === 'PROCESSING'"
+             :class="['processing-indicator-floating', processingIndicatorMinimized ? 'minimized' : '']">
+            <template v-if="!processingIndicatorMinimized">
+                <div class="processing-indicator-content">
+                    <i class="fas fa-spinner fa-spin text-[var(--text-accent)]"></i>
+                    <span class="text-sm text-[var(--text-secondary)]" v-text="t('help.processingTranscription')"></span>
+                </div>
+                <button @click="processingIndicatorMinimized = true"
+                        class="processing-indicator-minimize"
+                        :title="t('tooltips.minimize')">
+                    <i class="fas fa-chevron-up"></i>
+                </button>
+            </template>
+            <template v-else>
+                <button @click="processingIndicatorMinimized = false"
+                        class="processing-indicator-expand"
+                        :title="t('help.processingTranscription')">
+                    <i class="fas fa-spinner fa-spin"></i>
+                </button>
+            </template>
+        </div>
+
+        <!-- No transcription state (only show if not processing and no transcription) -->
+        {{ phone_empty('transcript', "t('transcription.noTranscription')", "t('transcription.emptyHint')", icon='fa-align-left',
+                       attrs='v-if="!selectedRecording.transcription && selectedRecording.status !== \'PROCESSING\'"') }}
+
+        <!-- Error Display (when transcription is an error message) -->
+        <div v-if="processedTranscription.isError" class="error-display-container p-2">
+            {% include 'components/detail/_transcription-error.html' %}
+        </div>
+
+        <!-- Translation in progress (mobile): same spinner state as the
+             desktop panel and the summary tab. -->
+        <div v-if="viewingTranslation && translationJobActive" class="empty ph-empty" data-phone-empty="translation-busy">
+            <div class="ph-empty__mark"><div class="spinner spinner--lg"></div></div>
+            <div class="empty__title" v-text="translationProgressTitle"></div>
+            <div v-if="translationProgress !== null" class="mx-auto mt-3 w-48 max-w-full h-1 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden"
+                 role="progressbar" :aria-valuenow="translationProgress" aria-valuemin="0" aria-valuemax="100">
+                <div class="h-full bg-[var(--bg-accent)] rounded-full transition-all duration-300" :style="{width: translationProgress + '%'}"></div>
+            </div>
+        </div>
+
+        <!-- Empty translation state (mobile): the same layout as the other
+             empty states. Without a transcript, only the transcript's own
+             empty state is shown. -->
+        {% call phone_empty('translation', "t('translation.noTranslation')", icon='fa-language',
+                            attrs='v-if="viewingTranslation && !translationJobActive && selectedRecording.transcription && !selectedRecording.transcription_translation"') %}
+            <div v-if="selectedRecording.incognito" class="empty__body" :title="t('tooltips.translateTranscriptIncognito')"
+                 v-text="t('translation.incognitoUnavailable')"></div>
+            <div v-else-if="selectedRecording.can_edit !== false" class="ph-empty__acts">
+                <button @click="generateTranslation()" :disabled="translationJobActive" class="btn btn--primary">
+                    <i class="fas fa-language"></i>
+                    <span v-text="t('translation.generate')" data-i18n="translation.generate"></span>
+                </button>
+                <button @click="openTranslationModal" class="btn btn--ghost btn--icon" :title="t('translation.preferences')">
+                    <i class="fas fa-sliders-h"></i>
+                </button>
+            </div>
+        {% endcall %}
+
+        <!-- Transcription content (show regardless of processing state if transcription exists) -->
+        <div v-if="selectedRecording.transcription && !processedTranscription.isError && !(viewingTranslation && (translationJobActive || !(selectedRecording && selectedRecording.transcription_translation)))">
+            <!-- Speaker-run layout: consecutive same-speaker segments
+                 grouped under one .speaker-run so the speaker pill at
+                 the top of the run can stay sticky for the WHOLE run.
+                 Was iterating over the flat simpleSegments before,
+                 which meant each segment was its own sticky scope and
+                 the pill disappeared as soon as the first segment
+                 scrolled past — the "sticky pills don't work" symptom. -->
+            <div v-if="!processedTranscription.hasDialogue || transcriptionViewMode === 'simple'" class="transcription-simple-view">
+                <div v-if="processedTranscription.hasDialogue" data-tv-list>
+                    <div class="tv-spacer tv-spacer--before" data-tv-before :style="{ height: transcriptView.before + 'px' }"></div>
+                    {% with ui_slot = 'transcript-turn-mobile' %}{% include 'themes/slot.html' %}{% endwith %}
+                    <div class="tv-spacer tv-spacer--after" data-tv-after :style="{ height: transcriptView.after + 'px' }"></div>
+                </div>
+                <div v-else>
+                    <div v-if="processedTranscription.simpleSegments && processedTranscription.simpleSegments.length > 0" data-tv-list>
+                        <div class="tv-spacer tv-spacer--before" data-tv-before :style="{ height: transcriptView.before + 'px' }"></div>
+                        <div v-for="unit in transcriptView.segments" :key="unit.key" :data-tv-unit="unit.unit" :class="['transcript-segment cursor-pointer hover:bg-[var(--bg-accent-hover)] p-2 rounded transition-colors', { 'active-playing-segment': currentPlayingSegmentIndex === unit.first }]" @click="seekAudioFromEvent" @dblclick.stop="openAsrEditorAtSegment(unit.first)" :data-start-time="unit.segment.startTime" :data-segment-index="unit.first"><span v-if="showTimestampsSimpleView" class="speaker-segment-timestamp speaker-segment-timestamp--inline">${ formatTimestamp(unit.segment.startTime) }</span>${unit.segment.sentence}</div>
+                        <div class="tv-spacer tv-spacer--after" data-tv-after :style="{ height: transcriptView.after + 'px' }"></div>
+                    </div>
+                    <div v-else class="whitespace-pre-wrap bidi-auto">${processedTranscription.content}</div>
+                </div>
+            </div>
+            <div v-else-if="transcriptionViewMode === 'bubble'" class="transcription-with-speakers" data-tv-list>
+                <!-- Speaker legend (bubble view) — same collapsible legend
+                     as desktop; was missing on mobile so users couldn't see
+                     who the bubble colours map to. -->
+                <div v-if="processedTranscription.speakers && processedTranscription.speakers.length > 0"
+                     :class="['speaker-legend', legendExpanded ? 'expanded' : '']">
+                    <div class="speaker-legend-header" @click="legendExpanded = !legendExpanded">
+                        <div class="speaker-legend-title">
+                            <i class="fas fa-users"></i>
+                            <span v-text="t('help.speakers')"></span>
+                            <span class="speaker-count-indicator">(${processedTranscription.speakers.length})</span>
+                        </div>
+                        <i class="fas fa-chevron-down speaker-legend-toggle"></i>
+                    </div>
+                    <div class="speaker-legend-content">
+                        <div v-for="(speaker, index) in processedTranscription.speakers"
+                             :key="`${selectedRecording.id}-mobile-speaker-legend-${index}`"
+                             :class="['speaker-legend-item', speaker.color]">
+                            <span class="speaker-name">${speaker.name}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="tv-spacer tv-spacer--before" data-tv-before :style="{ height: transcriptView.before + 'px' }"></div>
+                <div v-for="row in transcriptView.rows" :key="`${selectedRecording.id}-${row.key}`" :data-tv-unit="row.unit" :class="['bubble-row', row.isMe ? 'speaker-me' : '']">
+                    <div v-for="bubble in row.bubbles" :key="`bubble-${bubble.index}-${bubble.startTime}`" :class="['speaker-bubble', bubble.color, row.isMe ? 'speaker-me' : '', { 'active-playing-segment': currentPlayingSegmentIndex === bubble.index }]" @click="seekAudioFromEvent" :data-start-time="bubble.startTime" :data-segment-index="bubble.index">
+                        <div class="speaker-bubble-content">${bubble.sentence}</div>
+                    </div>
+                </div>
+                <div class="tv-spacer tv-spacer--after" data-tv-after :style="{ height: transcriptView.after + 'px' }"></div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- The translation dialog (target language), for Translation preferences in
+     Actions and the button of an empty translation. Outside the tab's block,
+     so Actions can open it from any tab. -->
+    <div v-if="showTranslationModal" class="modal-overlay" @click.self="showTranslationModal = false">
+        <div class="modal-panel modal-panel--sm">
+            <div class="modal-header">
+                <h3 class="modal-title" v-text="t('translation.generateTitle')" data-i18n="translation.generateTitle"></h3>
+                <button class="modal-close" @click="showTranslationModal = false"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <label class="block text-sm mb-2" v-text="t('translation.targetLanguage')" data-i18n="translation.targetLanguage"></label>
+                <select v-model="translationTargetLanguage" class="mt-1 block w-full px-3 py-2 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)]">
+                    <option v-for="option in translationLanguageOptions" :key="option.value" :value="option.value" v-text="option.label"></option>
+                </select>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn--ghost" @click="showTranslationModal = false" v-text="t('common.cancel')" data-i18n="common.cancel"></button>
+                <button class="btn btn--primary" @click="generateTranslation(translationTargetLanguage)" :disabled="translationJobActive" v-text="t('translation.generate')" data-i18n="translation.generate"></button>
+            </div>
+        </div>
+    </div>

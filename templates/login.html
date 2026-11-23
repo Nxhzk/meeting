@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f8f7f3">
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+    <title>登录 · 捷士通智能会议</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='img/jst/mark.png', v=1) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/meeting-quiet.css', v='jst-quiet-5') }}">
+    <script src="{{ url_for('static', filename='js/service-worker-client.js', v=app_version) }}" defer></script>
+</head>
+<body class="login-page">
+    {% include 'includes/jst_header.html' %}
+    {% macro field(input, label, autocomplete) %}
+        <div class="login-field">
+            {{ input.label(text=label) }}
+            {% if input.errors %}
+                {{ input(autocomplete=autocomplete, aria_invalid='true', aria_describedby=input.id ~ '-errors') }}
+                <ul id="{{ input.id }}-errors" class="field-errors">{% for error in input.errors %}<li>{{ error }}</li>{% endfor %}</ul>
+            {% else %}{{ input(autocomplete=autocomplete) }}{% endif %}
+        </div>
+    {% endmacro %}
+    {% macro password_form() %}
+        <form class="login-form" method="post" action="{{ url_for('auth.login', next=request.args.get('next')) }}">
+            {{ form.hidden_tag() }}
+            {{ field(form.email, '账号', 'username') }}
+            {{ field(form.password, '密码', 'current-password') }}
+            <div class="login-options">
+                <label class="remember-label">{{ form.remember() }} 保持登录</label>
+                {% if not password_login_disabled %}<a href="{{ url_for('auth.forgot_password') }}">忘记密码</a>{% endif %}
+            </div>
+            <button type="submit" class="primary-button login-submit">登录</button>
+        </form>
+    {% endmacro %}
+    <main class="login-main">
+        <section class="login-paper" aria-label="登录">
+            {% for category, message in get_flashed_messages(with_categories=true) %}
+                {% if not (category == 'info' and message == t('server.flash.loginRequired')) %}<p class="login-message" data-tone="{{ 'error' if category in ('danger', 'error') else 'info' }}" role="status">{{ message }}</p>{% endif %}
+            {% endfor %}
+            {% if sso_enabled %}
+                <form class="login-form sso-form" method="get" action="{{ url_for('auth.sso_login') }}">
+                    {% if request.args.get('next') %}<input type="hidden" name="next" value="{{ request.args.get('next') }}">{% endif %}
+                    <button type="submit" class="{{ 'primary-button' if password_login_disabled else 'secondary-button' }} login-submit">使用 {{ sso_provider_name }} 登录</button>
+                    <label class="remember-label"><input type="checkbox" name="remember" value="1"> 保持登录</label>
+                </form>
+            {% endif %}
+            {% if password_login_disabled %}
+                <details class="login-fallback"{% if request.method == 'POST' %} open{% endif %}><summary>使用账号和密码登录</summary>{{ password_form() }}</details>
+            {% else %}
+                {{ password_form() }}
+                {% if registration_enabled %}<p class="login-register"><a href="{{ url_for('auth.register') }}">注册账号</a></p>{% endif %}
+            {% endif %}
+        </section>
+    </main>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# Machine-local configuration and credentials
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+keystore.properties
+local.properties
+
+# Runtime data and local build artifacts
+/data/
+/uploads/
+/recordings/
+/backups/
+*.db
+*.db-*
+*.sqlite*
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+node_modules/
+.DS_Store

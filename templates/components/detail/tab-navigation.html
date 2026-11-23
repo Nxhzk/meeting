@@ -1,0 +1,27 @@
+<!-- The tab bar of a recording on a phone: always Summary, Transcript, Notes
+     and the assistant. Events and Speaker stats are sheets, opened from the
+     row above the summary and from Actions. Each tab is 58px high, a touch
+     target of more than 44px. -->
+<nav data-mobile-bottom-nav class="ph-tabs flex-shrink-0" :aria-label="t('phone.sections')">
+    <button type="button" data-phone-tab="summary" @click="mobileTab = 'summary'"
+            :aria-current="mobileTab === 'summary' ? 'true' : 'false'">
+        <span class="ph-tabs__icon"><i class="fas fa-file-alt" aria-hidden="true"></i></span>
+        <span class="ph-tabs__label" v-text="t('summary.title')"></span>
+    </button>
+    <button type="button" data-phone-tab="transcript" @click="mobileTab = 'transcript'"
+            :aria-current="mobileTab === 'transcript' ? 'true' : 'false'">
+        <span class="ph-tabs__icon"><i class="fas fa-align-left" aria-hidden="true"></i></span>
+        <span class="ph-tabs__label" v-text="t('transcription.title')"></span>
+    </button>
+    <button type="button" data-phone-tab="notes" @click="mobileTab = 'notes'"
+            :aria-current="mobileTab === 'notes' ? 'true' : 'false'">
+        <span class="ph-tabs__icon"><i class="fas fa-sticky-note" aria-hidden="true"></i></span>
+        <span class="ph-tabs__label" v-text="t('notes.title')"></span>
+    </button>
+    <button type="button" data-phone-tab="chat" @click="mobileTab = 'chat'"
+            :aria-current="mobileTab === 'chat' ? 'true' : 'false'">
+        <span class="ph-tabs__icon">{% with avatar_size = 'sm' %}{% include 'includes/assistant_avatar.html' %}{% endwith %}</span>
+        <span class="ph-tabs__label" v-text="assistantName"></span>
+        <span v-if="chatMessages && chatMessages.length > 0" class="ph-tabs__count" v-text="chatMessages.length"></span>
+    </button>
+</nav>

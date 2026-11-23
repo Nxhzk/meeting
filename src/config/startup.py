@@ -1,0 +1,507 @@
+"""
+Application startup functions.
+"""
+
+import os
+import time
+import threading
+from datetime import datetime, timedelta
+from flask import current_app
+from src.utils.localization import api_error
+
+
+# Cross-process elections for work that must run in exactly one process.
+#
+# src/app.py calls run_startup_tasks() at module scope, so EVERY process that
+# imports it runs this file: the entrypoint's schema check, the admin-user
+# script, and each gunicorn worker (three by default). Anything here that
+# starts a thread, watches a directory or sweeps a table therefore ran that
+# many times over.
+#
+# That is not a hypothetical. It is #384: orphan recovery in every booting
+# process un-claimed jobs a sibling was mid-way through transcribing, and the
+# same audio went to the ASR service once per worker. The process-local
+# `global _x_started` guards several of these used are worthless here, because
+# each process has its own copy of the global.
+#
+# The fix is an election per responsibility. Route background work through
+# start_single_instance() below rather than calling it directly, so that
+# adding a new one forces the question "which process should run this?" to be
+# answered rather than skipped.
+JOB_QUEUE_OWNER_LOCK = 'speakr.job_queue_owner'
+FILE_MONITOR_OWNER_LOCK = 'speakr.file_monitor_owner'
+AUTO_DELETION_OWNER_LOCK = 'speakr.auto_deletion_owner'
+SESSION_CLEANUP_OWNER_LOCK = 'speakr.session_cleanup_owner'
+WEBHOOK_DISPATCHER_OWNER_LOCK = 'speakr.webhook_dispatcher_owner'
+VOICE_EMBEDDING_CHECK_OWNER_LOCK = 'speakr.voice_embedding_check_owner'
+TRANSCRIPT_UNICODE_REWRITE_OWNER_LOCK = 'speakr.transcript_unicode_rewrite_owner'
+
+# Every lock name this module elects on. The test suite asserts that each
+# background starter in run_startup_tasks() goes through one of these.
+SINGLE_INSTANCE_LOCKS = (
+    JOB_QUEUE_OWNER_LOCK,
+    FILE_MONITOR_OWNER_LOCK,
+    AUTO_DELETION_OWNER_LOCK,
+    SESSION_CLEANUP_OWNER_LOCK,
+    WEBHOOK_DISPATCHER_OWNER_LOCK,
+    VOICE_EMBEDDING_CHECK_OWNER_LOCK,
+    TRANSCRIPT_UNICODE_REWRITE_OWNER_LOCK,
+)
+
+
+def start_single_instance(app, lock_name, start, description):
+    """Run `start` only in the process that wins the election for `lock_name`.
+
+    Losing is the normal outcome for most processes and is logged at debug;
+    it is not a failure. The election fails open, so the worst case is the
+    pre-election behaviour rather than work that never runs at all.
+    """
+    from src.database import db
+    from src.utils.database import acquire_singleton_lock
+
+    try:
+        if not acquire_singleton_lock(db.engine, lock_name, app.logger):
+            app.logger.debug("%s runs in another process; skipping here", description)
+            return False
+    except Exception as e:
+        # Never let the election itself cost us the work it guards.
+        app.logger.error(
+            "Could not run the election for %s, starting it here anyway: %s", description, e)
+
+    try:
+        start()
+        return True
+    except Exception as e:
+        app.logger.warning("%s failed to start: %s", description, e)
+        return False
+
+
+def background_tasks_skipped():
+    """True when this process must start no background work at all.
+
+    Set SPEAKR_SKIP_BACKGROUND_TASKS=true before importing src.app in a
+    one-off command (such as scripts/clean_unreferenced_files.py) that runs
+    next to a live server. Such a process would otherwise take part in the
+    elections below and, on winning one, recover the server's running jobs or
+    start a second scheduler.
+    """
+    return os.environ.get('SPEAKR_SKIP_BACKGROUND_TASKS', '').strip().lower() in ('1', 'true', 'yes')
+
+
+def initialize_file_monitor(app):
+    """Initialize file monitor after app is fully loaded to avoid circular imports."""
+    try:
+        # Import here to avoid circular imports
+        import src.file_monitor as file_monitor
+        file_monitor.start_file_monitor()
+        app.logger.info("File monitor initialization completed")
+    except Exception as e:
+        app.logger.warning(f"File monitor initialization failed: {e}")
+
+def get_file_monitor_functions(app):
+    """Get file monitor functions, handling import errors gracefully."""
+    try:
+        import src.file_monitor as file_monitor
+        return file_monitor.start_file_monitor, file_monitor.stop_file_monitor, file_monitor.get_file_monitor_status
+    except ImportError as e:
+        app.logger.warning(f"File monitor not available: {e}")
+
+        # Create stub functions if file_monitor is not available
+        def start_file_monitor():
+            pass
+        def stop_file_monitor():
+            pass
+        def get_file_monitor_status():
+            return {'running': False, **api_error('file_monitor_unavailable')}
+
+        return start_file_monitor, stop_file_monitor, get_file_monitor_status
+
+# --- Auto-Processing API Endpoints ---
+def scheduled_deletion_due():
+    """Whether the daily auto-deletion run should delete anything.
+
+    The same two conditions that used to decide at startup whether the
+    scheduler started at all: auto-deletion on and a global retention period.
+    """
+    return bool(_self.ENABLE_AUTO_DELETION) and _self.GLOBAL_RETENTION_DAYS > 0
+
+
+def run_daily_maintenance(app):
+    """The work of one daily run: retention auto-deletion, the ownerless
+    cleanup, then the pruning of the audit log.
+
+    Auto-deletion deletes only when it is enabled. The cleanup of recordings
+    without an owner (#572) is integrity, not retention, and runs every
+    time, also when auto-deletion failed. Both run in the scheduler thread,
+    so the single-instance election that guards the sweep guards both.
+    """
+    from src.services.retention import process_auto_deletion
+
+    try:
+        with app.app_context():
+            if scheduled_deletion_due():
+                app.logger.info("Running scheduled auto-deletion...")
+                stats = process_auto_deletion()
+                app.logger.info(f"Scheduled auto-deletion completed: {stats}")
+            else:
+                app.logger.info("Scheduled auto-deletion skipped (disabled or no global retention)")
+    except Exception as e:
+        app.logger.error(f"Error in scheduled auto-deletion: {e}", exc_info=True)
+
+    with app.app_context():
+        from src.services.ownerless_cleanup import run_ownerless_cleanup
+        run_ownerless_cleanup()
+
+    # Finished job rows past a week, and jobs of deleted recordings (#625).
+    # A week, because the admin overview counts the failed jobs of the last 7 days.
+    try:
+        from src.services.job_queue import job_queue
+        job_queue.cleanup_old_jobs(max_age_hours=7 * 24)
+    except Exception as e:
+        app.logger.error(f"Error while cleaning up old jobs: {type(e).__name__}")
+
+    # Audit log rows past audit_log_retention_days. Here and not in the hourly
+    # cleanup loop, because that loop can be turned off and this thread
+    # always starts.
+    try:
+        with app.app_context():
+            from src.services.audit import prune_audit_events
+            pruned = prune_audit_events()
+            if pruned:
+                app.logger.info(f"Pruned {pruned} audit log row(s)")
+    except Exception as e:
+        app.logger.error(f"Error while pruning the audit log: {type(e).__name__}")
+
+
+def initialize_auto_deletion_scheduler(app):
+    """Start the daily 2 AM thread that calls run_daily_maintenance()."""
+
+    # The thread always starts. Whether a run deletes anything is decided at
+    # run time, so enable_auto_deletion and global_retention_days can be
+    # changed in System Settings without a restart (#567).
+
+    def run_daily_deletion():
+        """Background thread that runs auto-deletion daily at 2 AM."""
+        import time
+        from datetime import datetime, timedelta
+
+        app.logger.info("Auto-deletion scheduler started - will run daily at 2:00 AM")
+
+        while True:
+            try:
+                # Calculate time until next 2 AM
+                now = datetime.now()
+                next_run = now.replace(hour=2, minute=0, second=0, microsecond=0)
+
+                # If it's past 2 AM today, schedule for tomorrow
+                if now.hour >= 2:
+                    next_run += timedelta(days=1)
+
+                sleep_seconds = (next_run - now).total_seconds()
+
+                app.logger.info(f"Next auto-deletion scheduled for: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {sleep_seconds/3600:.1f} hours)")
+
+                # Sleep until next run time
+                time.sleep(sleep_seconds)
+
+                run_daily_maintenance(app)
+
+            except Exception as e:
+                app.logger.error(f"Error in auto-deletion scheduler: {e}", exc_info=True)
+                # Sleep for 1 hour before retrying on error
+                time.sleep(3600)
+
+    # Start the scheduler thread
+    import threading
+    scheduler_thread = threading.Thread(target=run_daily_deletion, daemon=True, name="AutoDeletionScheduler")
+    scheduler_thread.start()
+    app.logger.info("✅ Auto-deletion scheduler initialized - running daily at 2:00 AM")
+
+
+def initialize_file_exporter(app):
+    """Initialize file exporter after app is fully loaded."""
+    try:
+        from src.file_exporter import initialize_export_directory, ENABLE_AUTO_EXPORT
+        if ENABLE_AUTO_EXPORT:
+            initialize_export_directory()
+            app.logger.info("✅ Auto-export initialized")
+        else:
+            app.logger.info("ℹ️  Auto-export: Disabled (set ENABLE_AUTO_EXPORT=true to enable)")
+    except Exception as e:
+        app.logger.warning(f"File exporter initialization failed: {e}")
+
+
+def bind_job_queue(app):
+    """Make the queue usable in this process. Every process needs this.
+
+    Binding is not the same as owning: a process that lost the election still
+    accepts uploads and enqueues them, it just runs no workers.
+    """
+    from src.services.job_queue import job_queue
+    job_queue.init_app(app)
+
+
+def start_job_queue(app):
+    """Recover orphaned jobs and run the workers. Owner process only.
+
+    Recovery is the reason this must not run everywhere: it resets every row
+    in `processing` back to `queued` with no way to tell a job abandoned by a
+    crash from one a sibling process is transcribing right now (#384).
+    """
+    from src.services.job_queue import job_queue
+
+    job_queue.mark_as_owner()
+    job_queue.recover_orphaned_jobs()
+    job_queue.start()
+
+    status = job_queue.get_queue_status()
+    t_queue = status['transcription_queue']
+    s_queue = status['summary_queue']
+    i_queue = status['index_queue']
+    c_queue = status['convert_queue']
+    app.logger.info(
+        f"Job queues started: "
+        f"transcription ({t_queue['workers']} workers, {t_queue['queued']} queued), "
+        f"summary ({s_queue['workers']} workers, {s_queue['queued']} queued), "
+        f"index ({i_queue['workers']} workers, {i_queue['queued']} queued), "
+        f"convert ({c_queue['workers']} workers, {c_queue['queued']} queued)"
+    )
+
+
+def initialize_job_queue(app):
+    """Backwards-compatible wrapper: bind, elect, then start if we won."""
+    bind_job_queue(app)
+    start_single_instance(app, JOB_QUEUE_OWNER_LOCK,
+                          lambda: start_job_queue(app), 'job queue')
+
+
+# Guards a SECOND START INSIDE ONE PROCESS (Flask --reload, gunicorn --reload,
+# container restart-on-change). It cannot guard against other processes,
+# because each has its own copy of it; start_single_instance() does that.
+_cleanup_thread_started = False
+
+
+def initialize_recording_session_cleanup(app):
+    """Sweep expired recording sessions on a background thread.
+
+    Issue #287 (c)(d): in-progress recording sessions accumulate chunk
+    files in ``UPLOAD_FOLDER/_sessions/<id>/``. The session row's
+    ``last_seen_at`` is updated on every chunk POST; sessions that go
+    silent for longer than ``RECORDING_SESSION_TTL_HOURS`` (default 24)
+    are reaped here and their on-disk dirs removed.
+
+    Runs on the same pattern as the other schedulers in this module
+    (daemon thread with a sleep loop), with a configurable interval via
+    ``RECORDING_SESSION_CLEANUP_INTERVAL_SECONDS`` (default 3600 = hourly).
+    """
+    import os
+    import threading
+    import time
+
+    global _cleanup_thread_started
+    if _cleanup_thread_started:
+        # Reload or duplicate init; the existing daemon is fine.
+        app.logger.info("Recording-session cleanup thread already running; skipping duplicate init")
+        return
+
+    interval = int(os.environ.get('RECORDING_SESSION_CLEANUP_INTERVAL_SECONDS', '3600'))
+    def _meeting_loop():
+        from src.api.recording_sessions import cleanup_due_meetings
+        while True:
+            try:
+                cleanup_due_meetings(app)
+            except Exception:
+                app.logger.exception('Meeting deadline sweep failed')
+            time.sleep(5)
+
+    def _loop():
+        from src.api.recording_sessions import cleanup_expired_sessions
+        app.logger.info(f"Recording-session cleanup scheduler started (interval={interval}s)")
+        # First sweep happens after the interval, not at boot, to avoid
+        # contention with other startup tasks.
+        while True:
+            try:
+                time.sleep(interval)
+                reaped = cleanup_expired_sessions(app=app)
+                if reaped:
+                    app.logger.info(f"Recording-session cleanup reaped {reaped} session(s)")
+                # Parts of an upload join that never completed.
+                with app.app_context():
+                    from src.services.upload_join import cleanup_stale_parts
+                    removed = cleanup_stale_parts()
+                if removed:
+                    app.logger.info(f"Upload-join cleanup removed {removed} stale part(s)")
+                # Changes-feed tombstones past RECORDING_TOMBSTONE_DAYS.
+                with app.app_context():
+                    from src.services.recording_changes import prune_tombstones
+                    pruned = prune_tombstones()
+                if pruned:
+                    app.logger.info(f"Pruned {pruned} recording tombstone(s)")
+                # Temporary files left by an incognito request that did not end normally.
+                with app.app_context():
+                    from src.services.incognito_temp import cleanup_stale
+                    cleanup_stale()
+                # Webhook delivery records past webhook_delivery_retention_days.
+                with app.app_context():
+                    from src.services.webhook_dispatch import prune_deliveries
+                    pruned_deliveries = prune_deliveries()
+                if pruned_deliveries:
+                    app.logger.info(f"Pruned {pruned_deliveries} webhook delivery record(s)")
+            except Exception as e:
+                app.logger.error(f"Recording-session cleanup error: {e}", exc_info=True)
+                # Don't tight-loop on failure
+                time.sleep(60)
+
+    threading.Thread(target=_meeting_loop, daemon=True, name='MeetingDeadline').start()
+    if interval > 0:
+        threading.Thread(target=_loop, daemon=True, name='RecordingSessionCleanup').start()
+    _cleanup_thread_started = True
+    app.logger.info("✅ Recording-session cleanup scheduler initialized")
+
+
+def initialize_voice_embedding_check(app):
+    """Check the voice embedding backend on a background thread (#380).
+
+    Off the boot path on purpose: it makes a real transcription request, and a
+    slow or unreachable ASR service must not delay the app coming up. A
+    failure to check is logged and leaves the previous verdict alone; a
+    backend that is down is not a backend that changed.
+    """
+    import threading
+
+    if os.environ.get('DISABLE_VOICE_EMBEDDING_CHECK', 'false').lower() == 'true':
+        app.logger.info("Voice embedding check disabled (DISABLE_VOICE_EMBEDDING_CHECK=true)")
+        return
+
+    def _run():
+        from src.services.voice_embedding_check import check_voice_embeddings
+        try:
+            with app.app_context():
+                result = check_voice_embeddings(app)
+                app.config['VOICE_EMBEDDING_STATUS'] = result
+        except Exception as e:
+            app.logger.warning(f"Voice embedding check failed to run: {e}")
+
+    threading.Thread(target=_run, daemon=True, name="VoiceEmbeddingCheck").start()
+
+
+def initialize_transcript_unicode_rewrite(app):
+    """Rewrite the transcripts stored with \\u escapes once, on a thread (#622).
+
+    The thread waits TRANSCRIPT_UNICODE_REWRITE_DELAY_SECONDS (default 30)
+    so that the rewrite does not compete with the boot, and does nothing once
+    the setting of a completed run is stored. See
+    src/services/transcript_unicode_rewrite.py.
+    """
+    import threading
+
+    if os.environ.get('DISABLE_TRANSCRIPT_UNICODE_REWRITE', 'false').lower() == 'true':
+        app.logger.info("Transcript Unicode rewrite disabled (DISABLE_TRANSCRIPT_UNICODE_REWRITE=true)")
+        return
+    try:
+        delay = max(0, int(os.environ.get('TRANSCRIPT_UNICODE_REWRITE_DELAY_SECONDS', '30')))
+    except ValueError:
+        delay = 30
+
+    def _run():
+        from src.services.transcript_unicode_rewrite import run_transcript_unicode_rewrite
+        time.sleep(delay)
+        try:
+            with app.app_context():
+                run_transcript_unicode_rewrite(log=app.logger)
+        except Exception as e:
+            # Rows already rewritten stay rewritten; the next start resumes.
+            app.logger.error(f"Transcript Unicode rewrite stopped: {type(e).__name__}")
+
+    threading.Thread(target=_run, daemon=True, name="TranscriptUnicodeRewrite").start()
+
+
+def run_startup_tasks(app):
+    """Run all startup tasks that need to happen after app creation."""
+    from src.models import SystemSetting
+
+    with app.app_context():
+        # Set dynamic MAX_CONTENT_LENGTH from DB settings. The Werkzeug
+        # ceiling is the higher of the two limits because audio-only video
+        # uploads can exceed max_file_size_mb (only the extracted audio
+        # has to fit that). The view-level handler re-checks each request
+        # against the right effective limit.
+        max_file_size_mb = int(SystemSetting.get_setting('max_file_size_mb', 250))
+        max_audio_only_video_mb = int(
+            SystemSetting.get_setting('max_audio_only_video_size_mb', max_file_size_mb * 4)
+        )
+        wsgi_ceiling_mb = max(max_file_size_mb, max_audio_only_video_mb)
+        app.config['MAX_CONTENT_LENGTH'] = wsgi_ceiling_mb * 1024 * 1024
+        app.logger.info(
+            f"Set MAX_CONTENT_LENGTH to {wsgi_ceiling_mb}MB "
+            f"(max_file_size_mb={max_file_size_mb}, "
+            f"max_audio_only_video_size_mb={max_audio_only_video_mb})"
+        )
+
+        # Bind the queue in EVERY process, so any of them can accept an
+        # upload and enqueue it. Only the owner elected below runs workers.
+        bind_job_queue(app)
+
+        if background_tasks_skipped():
+            app.logger.debug("SPEAKR_SKIP_BACKGROUND_TASKS is set: no background work started here")
+            return
+
+        # Everything below that runs in the background goes through
+        # start_single_instance(). Adding one here without an election means
+        # it runs once per gunicorn worker plus twice more from the
+        # entrypoint scripts; see the comment on SINGLE_INSTANCE_LOCKS.
+        start_single_instance(
+            app, JOB_QUEUE_OWNER_LOCK,
+            lambda: start_job_queue(app), 'job queue')
+
+        # Watches one directory. Several watchers racing over the same
+        # dropped file is how one upload becomes several recordings.
+        start_single_instance(
+            app, FILE_MONITOR_OWNER_LOCK,
+            lambda: initialize_file_monitor(app), 'automated file processing')
+
+        # Deletes recordings on a retention policy. Concurrent sweeps race
+        # each other over the same rows and files.
+        start_single_instance(
+            app, AUTO_DELETION_OWNER_LOCK,
+            lambda: initialize_auto_deletion_scheduler(app), 'auto-deletion scheduler')
+
+        # Reaps abandoned recording sessions (#287 c/d).
+        start_single_instance(
+            app, SESSION_CLEANUP_OWNER_LOCK,
+            lambda: initialize_recording_session_cleanup(app), 'recording-session cleanup')
+
+        # Posts webhook deliveries (#275). Its own guard is a module global,
+        # which is per-process, so without this every worker ran a dispatcher
+        # and each POSTed the same due rows.
+        from src.services.webhook_dispatch import start_dispatcher_thread
+        start_single_instance(
+            app, WEBHOOK_DISPATCHER_OWNER_LOCK,
+            lambda: start_dispatcher_thread(app), 'webhook dispatcher')
+
+        # Checks that the backend still returns voice embeddings compatible
+        # with the stored profiles (#380). Runs on a thread because it makes a
+        # real transcription request and must not hold up the boot.
+        start_single_instance(
+            app, VOICE_EMBEDDING_CHECK_OWNER_LOCK,
+            lambda: initialize_voice_embedding_check(app), 'voice embedding check')
+
+        # Rewrites the transcripts stored with \u escapes once (#622).
+        # Several processes running it would read and update the same rows.
+        start_single_instance(
+            app, TRANSCRIPT_UNICODE_REWRITE_OWNER_LOCK,
+            lambda: initialize_transcript_unicode_rewrite(app), 'transcript Unicode rewrite')
+
+        # Not elected: this only creates a directory and logs. No thread, no
+        # sweep, nothing to duplicate. If it ever grows a background task it
+        # needs to move up into the block above.
+        initialize_file_exporter(app)
+
+
+# Hot-applied System Settings (high priority) with environment fallback.
+from src.utils.system_settings import apply_hot_settings
+_SYSTEM_SETTING_MAP = {
+    "ENABLE_AUTO_DELETION": ('enable_auto_deletion', 'ENABLE_AUTO_DELETION', False),
+    "GLOBAL_RETENTION_DAYS": ('global_retention_days', 'GLOBAL_RETENTION_DAYS', 0),
+}
+_self, __getattr__ = apply_hot_settings(__name__, _SYSTEM_SETTING_MAP)

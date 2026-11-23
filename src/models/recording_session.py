@@ -1,0 +1,195 @@
+"""RecordingSession model for server-side in-progress recording chunks.
+
+Implements the backend half of issue #287 (c)(d): instead of accumulating
+the entire audio blob in browser RAM until the user clicks Upload, the
+in-app recorder POSTs MediaRecorder chunks to the server as they are
+produced. This model tracks the open session: a session id, the user who
+owns it, the chunks received so far, and the status as it transitions
+from `recording` → `finalizing` → `finalized` (with `aborted` and
+`expired` as terminal failure states).
+
+The on-disk layout for a session is:
+
+    {UPLOAD_FOLDER}/_sessions/<session_id>/
+        session.json           ← redundant copy of the columns for crash recovery
+        chunk-000001.webm
+        chunk-000002.webm
+        ...
+
+On finalize, the chunks are stitched into a single file via ffmpeg concat
+demux (handles pause/resume across MediaRecorder restarts, which a raw
+cat would corrupt). The resulting file becomes the new Recording's
+audio_path and the session directory is removed.
+
+The same session machinery also carries sliced uploads of files the user
+already has on disk, so those can cross a reverse proxy with a body-size
+limit below the file size. ``kind`` says which of the two a session is.
+A sliced upload's chunks are fixed-size byte slices of one complete
+container rather than MediaRecorder timeslices, so it finalizes through
+the normal upload ingestion path (plain byte-join, no stitch, no remux)
+and is never auto-finalized when abandoned: the user's original file
+still exists, so there is nothing to recover.
+"""
+
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from src.database import db
+
+
+# Status constants kept as module-level strings so callers can reference
+# them by name. SQLAlchemy doesn't enforce the enum, so all reads / writes
+# go through these constants.
+RECORDING_SESSION_STATUSES = (
+    'recording',     # client is actively POSTing chunks
+    'finalizing',    # finalize requested; stitch job is queued or running
+    'finalized',     # stitch completed; session dir may already be removed
+    'aborted',       # user (or admin) cancelled before finalize
+    'expired',       # TTL elapsed without finalize; cleanup ran
+    'failed',        # stitch or ingestion hit a permanent error
+)
+
+# The statuses after which no request and no job works on the session.
+RECORDING_SESSION_ENDED = ('finalized', 'aborted', 'expired', 'failed')
+
+RECORDING_SESSION_KINDS = (
+    'recorder',        # in-app recorder streaming MediaRecorder timeslices
+    'meeting',         # simple meeting UI, with a server-enforced deadline
+    'sliced_upload',   # byte slices of a file the user already has on disk
+)
+
+
+MEETING_MAX_SECONDS = 60 * 60
+# Let the final timeslice arrive after MediaRecorder.stop(), even on mobile.
+MEETING_UPLOAD_GRACE_SECONDS = 15
+# A session is provisional until its first audio part, not proof of a working microphone.
+MEETING_EMPTY_START_GRACE_SECONDS = 180
+# A stop from another device gives the recorder a bounded window to flush its tail.
+MEETING_REMOTE_STOP_GRACE_SECONDS = 10
+MEETING_STOP_METADATA_KEY = 'meeting_stop_requested_at'
+
+
+class RecordingSession(db.Model):
+    """An in-progress browser-recorder session with chunks on the server."""
+
+    __tablename__ = 'recording_session'
+
+    # Use a UUID4 string as the primary key. Predictable integer ids would
+    # let an attacker who guesses an id POST chunks into another user's
+    # session before the ownership check fires; UUID4 makes that infeasible.
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey('user.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+
+    # The MIME type the client declared when creating the session. Stored so
+    # we can validate per-chunk uploads (reject anything inconsistent with
+    # the declared type) and pick the right ffmpeg input args at stitch time.
+    mime_type = db.Column(db.String(100), nullable=False, default='audio/webm')
+
+    kind = db.Column(db.String(20), nullable=False, default='recorder', index=True)
+
+    upload_filename = db.Column(db.String(255), nullable=True)
+
+    upload_total_bytes = db.Column(db.BigInteger, nullable=True)
+
+    # Status transitions are guarded by the API; see RECORDING_SESSION_STATUSES.
+    status = db.Column(db.String(20), nullable=False, default='recording', index=True)
+
+    # Monotonic counter advanced on every successful chunk POST. The next
+    # expected client-supplied chunk index equals `chunk_count + 1`. Out-of-
+    # order POSTs are rejected with a 409 telling the client the expected
+    # next index so it can resync.
+    chunk_count = db.Column(db.Integer, nullable=False, default=0)
+
+    # Cumulative bytes received across all chunks. Used for the per-user
+    # storage quota check and to populate Recording.file_size on finalize.
+    bytes_received = db.Column(db.BigInteger, nullable=False, default=0)
+
+    # Set when finalize succeeds; lets the recording detail view link back
+    # to the session that produced it for audit purposes.
+    finalized_recording_id = db.Column(
+        db.Integer,
+        db.ForeignKey('recording.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+
+    # Optional user-supplied finalize metadata (notes, tags, folder, ASR
+    # options, prompt variables). Stored as JSON text so the stitch worker
+    # can read it without an additional table. It holds text of the user, and
+    # so does upload_filename: both are cleared when the session ends
+    # (finalized, aborted, expired, or a failed sliced upload) and when its
+    # recording is deleted. A recorder session whose stitch failed keeps the
+    # metadata for the retry of the job, until its recording is deleted.
+    finalize_metadata = db.Column(db.Text, nullable=True)
+
+    # Optional error message when status == 'failed'.
+    error_message = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
+    last_seen_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
+    finalized_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship(
+        'User',
+        backref=db.backref('recording_sessions', lazy='dynamic', cascade='all, delete-orphan'),
+    )
+    finalized_recording = db.relationship('Recording', foreign_keys=[finalized_recording_id])
+
+    @property
+    def is_sliced_upload(self):
+        return self.kind == 'sliced_upload'
+
+    @property
+    def meeting_deadline(self):
+        if self.kind == 'meeting' and self.created_at is not None:
+            return self.created_at + timedelta(seconds=MEETING_MAX_SECONDS)
+        return None
+
+    @property
+    def meeting_stop_requested_at(self):
+        if self.kind != 'meeting' or self.status != 'recording' or not self.finalize_metadata:
+            return None
+        import json
+        try:
+            value = json.loads(self.finalize_metadata).get(MEETING_STOP_METADATA_KEY)
+            return datetime.fromisoformat(value) if value else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    def meeting_timing(self):
+        deadline = self.meeting_deadline
+        if deadline is None:
+            return {}
+        return {
+            'end_requested': self.meeting_stop_requested_at is not None,
+            'meeting_ends_at': deadline.replace(tzinfo=timezone.utc).isoformat(),
+            'meeting_remaining_ms': max(0, int((deadline - datetime.utcnow()).total_seconds() * 1000)),
+        }
+
+    def __repr__(self):  # pragma: no cover - debugging aid
+        return f'<RecordingSession {self.id} user={self.user_id} status={self.status} chunks={self.chunk_count}>'
+
+    def to_dict(self):
+        """Public view of the session for API responses."""
+        return {
+            'session_id': self.id,
+            'status': self.status,
+            'mime_type': self.mime_type,
+            'kind': self.kind,
+            'upload_filename': self.upload_filename,
+            'upload_total_bytes': self.upload_total_bytes,
+            'chunk_count': self.chunk_count,
+            'bytes_received': self.bytes_received,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'last_seen_at': self.last_seen_at.isoformat() if self.last_seen_at else None,
+            'finalized_at': self.finalized_at.isoformat() if self.finalized_at else None,
+            'finalized_recording_id': self.finalized_recording_id,
+            'error_message': self.error_message,
+            **self.meeting_timing(),
+        }

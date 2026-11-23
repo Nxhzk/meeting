@@ -1,0 +1,141 @@
+<!-- Reprocess Modal (design system v1). Transcription only: summaries use
+     regenerate-summary-modal.html (#584). -->
+<div v-if="showReprocessModal" @click.self="cancelReprocess" class="modal-overlay">
+    <div class="modal-panel modal-panel--lg">
+        <div class="modal-header">
+            <i class="fas fa-sync-alt text-2xl text-[var(--text-accent)]"></i>
+            <div class="flex-1">
+                <h3 class="modal-title" v-text="t('help.confirmReprocessingTitle')"></h3>
+                <div class="modal-subtitle" v-text="t('reprocessModal.subtitleTranscription')"></div>
+            </div>
+            <button @click="cancelReprocess" class="modal-close" :title="t('buttons.close')"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div v-if="reprocessRecording" class="mb-6">
+                <div class="bg-[var(--bg-tertiary)] rounded-lg p-4 border border-[var(--border-primary)]">
+                    <div class="flex items-start space-x-3">
+                        <i class="fas fa-file-audio text-[var(--text-accent)] mt-1"></i>
+                        <div class="flex-1 min-w-0">
+                            <h4 class="font-medium text-[var(--text-primary)] truncate" :title="reprocessRecording.title">
+                                ${ reprocessRecording.title || t('reprocessModal.untitledRecording') }
+                            </h4>
+                            <p class="text-sm text-[var(--text-muted)] mt-1">
+                                ${ t('reprocessModal.createdPrefix') } ${ formatDisplayDate(reprocessRecording.created_at) }
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="space-y-4">
+                <div class="flex items-start space-x-3">
+                    <div class="w-6 h-6 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <i class="fas fa-exclamation-triangle text-amber-600 text-xs"></i>
+                    </div>
+                    <div>
+                        <p class="text-[var(--text-secondary)] font-medium mb-1" v-text="t('help.whatWillHappen')"></p>
+                        <p class="text-sm text-[var(--text-muted)]" v-if="reprocessType === 'transcription' && !connectorSupportsDiarization">
+                            <span v-text="t('reprocessModal.audioReTranscribedFromScratch')"></span>
+                        </p>
+                        <p class="text-sm text-[var(--text-muted)]" v-else-if="reprocessType === 'transcription' && connectorSupportsDiarization">
+                            <span v-text="t('reprocessModal.audioReTranscribedWithAsr')"></span>
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Language Selection - show for all transcription reprocessing -->
+                <div v-if="reprocessType === 'transcription'" class="space-y-4 pt-4 border-t border-[var(--border-primary)]">
+                    <div>
+                        <label for="asr-language-reprocess" class="block text-sm font-medium text-[var(--text-muted)]" v-text="t('form.language')"></label>
+                        <select id="asr-language-reprocess" v-model="asrReprocessOptions.language" class="mt-1 block w-full px-3 py-2 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)]">
+                            <option v-for="lang in languageOptions" :key="lang.value" :value="lang.value" v-text="lang.label"></option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Advanced Options for diarization-enabled connectors -->
+                <div v-if="reprocessType === 'transcription' && (connectorSupportsDiarization || connectorSupportsSpeakerCount || connectorSupportsExactSpeakerCount || connectorSupportsHotwords || connectorSupportsInitialPrompt)" class="space-y-4 pt-4 border-t border-[var(--border-primary)]">
+                    <h4 class="text-md font-semibold text-[var(--text-secondary)]" v-text="t('help.advancedAsrOptions')"></h4>
+                    <!-- Speaker count (#362): one compact row — label, Range/Exact toggle (range connectors only), narrow inputs; single writes min == max. -->
+                    <div v-if="connectorSupportsSpeakerCount || connectorSupportsExactSpeakerCount"
+                         class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                        <label class="text-sm font-medium text-[var(--text-muted)]" v-text="t('form.speakers')"></label>
+                        <div v-if="connectorSupportsSpeakerCount"
+                             class="inline-flex rounded border border-[var(--border-secondary)] overflow-hidden">
+                            <button type="button" @click="setSpeakerCountMode('range')"
+                                    :class="['px-2 py-0.5 text-[10px] transition-colors', !exactSpeakerEntry ? 'bg-[var(--bg-accent)] text-[var(--text-accent)] font-medium' : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]']"
+                                    v-text="t('form.speakerModeRange')"></button>
+                            <button type="button" @click="setSpeakerCountMode('single')"
+                                    :class="['px-2 py-0.5 text-[10px] transition-colors border-l border-[var(--border-secondary)]', exactSpeakerEntry ? 'bg-[var(--bg-accent)] text-[var(--text-accent)] font-medium' : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]']"
+                                    v-text="t('form.speakerModeExact')"></button>
+                        </div>
+                        <input v-if="exactSpeakerEntry"
+                               type="number" id="asr-speakers-exact-reprocess" v-model.number="reprocessSpeakersExact" min="1" max="20"
+                               class="w-20 px-2 py-1.5 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)]">
+                        <template v-else>
+                            <label for="asr-min-speakers-reprocess" class="text-[11px] text-[var(--text-muted)]" v-text="t('form.minSpeakers')"></label>
+                            <input type="number" id="asr-min-speakers-reprocess" v-model.number="asrReprocessOptions.min_speakers"
+                                   class="w-16 px-2 py-1.5 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)]">
+                            <label for="asr-max-speakers-reprocess" class="text-[11px] text-[var(--text-muted)]" v-text="t('form.maxSpeakers')"></label>
+                            <input type="number" id="asr-max-speakers-reprocess" v-model.number="asrReprocessOptions.max_speakers"
+                                   class="w-16 px-2 py-1.5 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)]">
+                        </template>
+                    </div>
+                    <div v-if="connectorSupportsHotwords">
+                        <label for="asr-hotwords-reprocess" class="block text-sm font-medium text-[var(--text-muted)]" v-text="t('form.hotwords')"></label>
+                        <input type="text" id="asr-hotwords-reprocess" v-model="asrReprocessOptions.hotwords" class="mt-1 block w-full px-3 py-2 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)]" :placeholder="t('form.hotwordsPlaceholder')">
+                        <p class="text-[10px] text-[var(--text-muted)] mt-0.5" v-text="t('form.hotwordsHelp')"></p>
+                    </div>
+                    <div v-if="connectorSupportsInitialPrompt">
+                        <label for="asr-initial-prompt-reprocess" class="block text-sm font-medium text-[var(--text-muted)]" v-text="t('form.initialPrompt')"></label>
+                        <textarea id="asr-initial-prompt-reprocess" v-model="asrReprocessOptions.initial_prompt" rows="2" class="mt-1 block w-full px-3 py-2 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)] resize-y" :placeholder="t('form.initialPromptPlaceholder')"></textarea>
+                        <p class="text-[10px] text-[var(--text-muted)] mt-0.5" v-text="t('form.initialPromptHelp')"></p>
+                    </div>
+                    <!-- Per-reprocess transcription model (issue #266).
+                         Only show when there are at least 2 visible models; a single
+                         visible model means there is no real choice to offer. -->
+                    <div v-if="transcriptionModelOptions && transcriptionModelOptions.length > 1">
+                        <label for="asr-model-reprocess" class="block text-sm font-medium text-[var(--text-muted)]">${ t('form.transcriptionModel') }</label>
+                        <select id="asr-model-reprocess" v-model="asrReprocessOptions.transcription_model" class="mt-1 block w-full px-3 py-2 border border-[var(--border-secondary)] rounded-md shadow-sm focus:outline-none focus:ring-[var(--border-focus)] focus:border-[var(--border-focus)] sm:text-sm bg-[var(--bg-input)] text-[var(--text-primary)]">
+                            <option value="">${ t('form.useResolvedDefault') }</option>
+                            <option v-for="opt in transcriptionModelOptions" :key="opt.value" :value="opt.value" v-text="opt.label || opt.value"></option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="flex items-start space-x-3">
+                    <div class="w-6 h-6 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <i class="fas fa-clock text-blue-600 text-xs"></i>
+                    </div>
+                    <div>
+                        <p class="text-[var(--text-secondary)] font-medium mb-1" v-text="t('help.processingTime')"></p>
+                        <p class="text-sm text-[var(--text-muted)]">
+                            <span v-text="t('help.processingTimeDescription')"></span>
+                        </p>
+                    </div>
+                </div>
+
+                <div class="flex items-start space-x-3" v-if="reprocessType === 'transcription'">
+                    <div class="w-6 h-6 bg-red-100 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <i class="fas fa-info-circle text-red-600 text-xs"></i>
+                    </div>
+                    <div>
+                        <p class="text-[var(--text-secondary)] font-medium mb-1" v-text="t('help.importantNote')"></p>
+                        <p class="text-sm text-[var(--text-muted)]">
+                            <span v-text="t('reprocessModal.manualEditsOverwritten')"></span>
+                        </p>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="modal-footer">
+            <button @click="cancelReprocess" class="btn btn--ghost">${ t('buttons.cancel') }</button>
+            <button @click="executeReprocess" class="btn btn--primary">
+                <i class="fas fa-sync-alt"></i>
+                <span>${ t('buttons.startReprocessing') }</span>
+            </button>
+        </div>
+    </div>
+</div>

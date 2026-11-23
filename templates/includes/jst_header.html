@@ -1,0 +1,14 @@
+<header class="site-header">
+    <div class="header-inner">
+        <div class="brand-lockup">
+            <img class="brand-logo" src="{{ url_for('static', filename='img/jst/logo.png', v=1) }}" width="267" height="105" alt="">
+            <span class="brand-divider" aria-hidden="true"></span>
+            <h1 class="site-title"><span class="sr-only">捷士通</span>智能会议</h1>
+        </div>
+        {% if meeting_options|default(false) %}
+        <button id="meeting-options" class="icon-button" type="button" aria-label="更多选项" title="更多选项" aria-haspopup="dialog" aria-controls="options-dialog">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+        </button>
+        {% endif %}
+    </div>
+</header>

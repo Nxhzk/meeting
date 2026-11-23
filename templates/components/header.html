@@ -1,0 +1,107 @@
+{% from 'components/queue/_queue.html' import queue_indicator %}
+<!-- Single adaptive top header.
+     In list view: shows Speakr logo + name.
+     In recording-detail view: title + inline meta + recording action
+     icons take that slot, so the separate detail header is no longer
+     needed (it used to add ~72px of vertical chrome).
+     On a phone (below 768px) a recording has its own top bar instead
+     (components/phone/recording-bar.html, the v-else-if of this header),
+     and the recording list is a screen with its own bar
+     (components/phone/list-head.html), so this header is not drawn then. -->
+<header v-if="!(isMobile && (phoneListOpen || (currentView === 'detail' && selectedRecording)))"
+        class="bg-[var(--bg-secondary)] border-b border-[var(--border-primary)] px-3 sm:px-4 py-2 flex items-center justify-between flex-shrink-0 z-50 gap-3" style="min-height: 56px;"
+        :class="{ 'app-header--detail': currentView === 'detail' && selectedRecording }">
+    <!-- Left side: Menu toggle + (logo OR recording title+meta+actions) -->
+    <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+        <!-- Menu Toggle Button -->
+        <!-- -mr-2 / sm:-mr-1.5: the button is a 40 / 36 px box around a 16 px
+             glyph, so its padding reads as extra space before the logo.
+             Pulling the logo in balances bars, logo and title (12 and 10 px
+             on phones, 16 and 14 px from sm up). -->
+        <button @click="toggleSidebar"
+                class="btn btn--icon header-action flex-shrink-0 -mr-2 sm:-mr-1.5"
+                :title="isSidebarCollapsed ? t('tooltips.showSidebar') : t('tooltips.hideSidebar')">
+            <i class="fas fa-bars text-lg"></i>
+        </button>
+
+        <!-- LIST VIEW (or any non-detail screen): Speakr logo + name -->
+        <div v-if="currentView !== 'detail' || !selectedRecording"
+             class="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+            <img src="{{ url_for('static', filename='img/icon-64.png') }}" srcset="{{ url_for('static', filename='img/icon-64.png') }} 1x, {{ url_for('static', filename='img/icon-128.png') }} 2x" alt="Speakr" class="app-logo w-7 h-7 sm:w-8 sm:h-8 flex-shrink-0">
+            <h1 class="text-lg sm:text-xl font-bold text-[var(--text-primary)] truncate">Speakr</h1>
+        </div>
+
+        <!-- DETAIL VIEW: recording title + inline meta + action icons.
+             Replaces the separate desktop-header.html for desktop.
+             On narrower screens (mobile) we still rely on mobile-header.html
+             below the global header for full metadata. -->
+        <template v-else>
+            <!-- Recording title. The wrapper uses flex-1 + min-w-0 so
+                 the title (h1 or input) can take all remaining
+                 horizontal space in the header row; the previous
+                 flex-shrink without flex-grow sized the wrapper to
+                 content, which made the input collapse to a few dozen
+                 pixels in edit mode. -->
+            <div class="flex items-center gap-2 min-w-0 flex-1">
+                <a href="/" class="flex-shrink-0 hidden sm:block sm:mr-1.5" :title="t('tooltips.backToHome')">
+                    <img src="{{ url_for('static', filename='img/icon-64.png') }}" srcset="{{ url_for('static', filename='img/icon-64.png') }} 1x, {{ url_for('static', filename='img/icon-128.png') }} 2x" alt="Speakr" class="app-logo w-7 h-7">
+                </a>
+                <h1 v-if="!editingTitle"
+                    @dblclick="selectedRecording.can_edit !== false ? toggleEditTitle() : null"
+                    :class="[
+                        'text-base sm:text-lg font-semibold truncate transition-opacity min-w-0',
+                        selectedRecording.is_shared ? 'text-[var(--text-accent)]' : 'text-[var(--text-primary)]',
+                        selectedRecording.can_edit !== false ? 'cursor-text hover:opacity-80' : ''
+                    ]"
+                    dir="auto"
+                    :title="selectedRecording.title || t('help.untitled')">
+                    ${selectedRecording.title || t('help.untitled')}
+                </h1>
+                <input v-else
+                       v-model="selectedRecording.title"
+                       @blur="saveTitle"
+                       @keyup.enter="saveTitle"
+                       @keyup.esc="cancelEditTitle"
+                       ref="titleInput"
+                       class="text-base sm:text-lg font-semibold bg-transparent border-b border-[var(--border-focus)] focus:outline-none text-[var(--text-primary)] flex-1 px-1 min-w-0"
+                       :placeholder="t('help.untitled')">
+                <button v-if="!editingTitle && selectedRecording.can_edit !== false"
+                        @click="toggleEditTitle"
+                        class="btn btn--icon btn--sm flex-shrink-0"
+                        :title="t('tooltips.editTitle')">
+                    <i class="fas fa-pen text-xs"></i>
+                </button>
+                <!-- Regenerate title (AI). Shown only for completed
+                     recordings, hidden while editing. Re-added per
+                     queue item #4 — was lost when the bespoke
+                     desktop-header.html merged into this adaptive
+                     header. -->
+                <button v-if="!editingTitle && selectedRecording.can_edit !== false && selectedRecording.status === 'COMPLETED'"
+                        @click="regenerateTitle"
+                        :disabled="regeneratingTitle"
+                        class="btn btn--icon btn--sm flex-shrink-0"
+                        :title="t('tooltips.regenerateTitle')">
+                    <i class="fas fa-sync-alt text-xs" :class="{ 'fa-spin': regeneratingTitle }"></i>
+                </button>
+                <!-- Status badge for non-completed recordings -->
+                <span v-if="!editingTitle && selectedRecording.status !== 'COMPLETED'"
+                      :class="getStatusClass(selectedRecording.status)"
+                      class="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full whitespace-nowrap flex-shrink-0">
+                    ${formatRecordingStatus(selectedRecording)}
+                </span>
+            </div>
+        </template>
+    </div>
+
+    <!-- Right side: detail-view action icons (when applicable) +
+         token budget + new recording + user menu -->
+    <div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+        <!-- The processing queue while the recording list is collapsed
+             (the list carries the indicator at its foot otherwise) -->
+        <template v-if="queuePlace === 'float' && queuePopupShown && !queueStatusBar">{{ queue_indicator('pill') }}</template>
+        {% with ui_slot = 'header-actions' %}{% include 'themes/slot.html' %}{% endwith %}
+
+        {% include 'components/header-controls.html' %}
+    </div>
+</header>
+{% include 'components/phone/recording-bar.html' %}

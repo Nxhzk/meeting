@@ -1,0 +1,828 @@
+"""
+Folder management and assignment.
+
+This blueprint handles folder CRUD operations and recording-folder assignments.
+Folders are one-to-many (a recording can only belong to one folder).
+"""
+
+import os
+import re
+from datetime import datetime
+from flask import Blueprint, request, jsonify, current_app
+from flask_login import login_required, current_user
+
+from sqlalchemy.exc import IntegrityError
+
+from src.database import db
+from src.models import *
+from src.utils.localization import api_error
+from src.services.auto_shares import (apply_folder_shares, drop_stale_auto_shares, regroup_error,
+                                      share_scope_refusal, sharing_state, sync_source_shares)
+
+# Create blueprint
+folders_bp = Blueprint('folders', __name__)
+
+# Configuration from environment
+
+# Global helpers (will be injected from app)
+has_recording_access = None
+bcrypt = None
+csrf = None
+limiter = None
+
+
+def init_folders_helpers(**kwargs):
+    """Initialize helper functions and extensions from app."""
+    global has_recording_access, bcrypt, csrf, limiter
+    has_recording_access = kwargs.get('has_recording_access')
+    bcrypt = kwargs.get('bcrypt')
+    csrf = kwargs.get('csrf')
+    limiter = kwargs.get('limiter')
+
+
+# Folder.name is String(50) and Folder.color is String(7). SQLite does not
+# enforce VARCHAR lengths and PostgreSQL rejects an over-long value with a
+# DataError at commit, so both are checked here (#512).
+FOLDER_NAME_MAX_LENGTH = 50
+DEFAULT_FOLDER_COLOR = '#10B981'
+_FOLDER_COLOR_RE = re.compile(r'#[0-9A-Fa-f]{6}')
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def _clean_folder_name(value):
+    """Return (name, None) for a valid folder name, else (None, error key)."""
+    if not isinstance(value, str) or not value.strip():
+        return None, 'folder_name_required'
+    if _CONTROL_CHARS_RE.search(value):
+        return None, 'folder_name_invalid'
+    name = value.strip()
+    if len(name) > FOLDER_NAME_MAX_LENGTH:
+        return None, 'folder_name_too_long'
+    return name, None
+
+
+def _clean_folder_color(value):
+    """Return (color, None) for #RRGGBB or a missing value, else (None, error key)."""
+    if value is None:
+        return DEFAULT_FOLDER_COLOR, None
+    if isinstance(value, str) and _FOLDER_COLOR_RE.fullmatch(value):
+        return value, None
+    return None, 'folder_color_invalid'
+
+
+def _folder_name_error(error_key):
+    if error_key == 'folder_name_too_long':
+        return jsonify(api_error(error_key, max=FOLDER_NAME_MAX_LENGTH)), 400
+    return jsonify(api_error(error_key)), 400
+
+
+def _parent_for_write(parent_id, user_id, group_id):
+    """Return (parent, None) for a valid parent_id, else (None, error key).
+
+    parent_id None or '' means top level. A parent must be in the scope the
+    folder is written to (#585): for a personal folder, a personal folder of
+    the same user; for a group folder, a folder of the same group.
+    """
+    if parent_id in (None, ''):
+        return None, None
+    if isinstance(parent_id, bool) or not isinstance(parent_id, int):
+        return None, 'folder_parent_invalid'
+    parent = db.session.get(Folder, parent_id)
+    if not parent:
+        return None, 'folder_parent_invalid'
+    if isinstance(group_id, str) and group_id.isdecimal():
+        group_id = int(group_id)
+    if not group_id:
+        valid = parent.group_id is None and parent.user_id == user_id
+    else:
+        valid = parent.group_id == group_id
+    return (parent, None) if valid else (None, 'folder_parent_invalid')
+
+
+def _folder_response(folder):
+    """Folder.to_dict with the recursive count, for the folder endpoints."""
+    from src.services.folder_tree import subtree_recording_count
+    return folder.to_dict(total_recording_count=subtree_recording_count(folder))
+
+
+def _name_taken_key(name, group_id, group_key):
+    """Error key for a folder write that lost on a unique index.
+
+    The pre-checks catch the common case; this runs when two writes race
+    or when the creator's own (name, user_id) constraint is what refused it.
+    """
+    if group_id and Folder.query.filter_by(name=name, group_id=group_id).first():
+        return group_key
+    return 'folder_name_exists'
+
+
+# --- Routes ---
+
+@folders_bp.route('/api/folders', methods=['GET'])
+@login_required
+def get_folders():
+    """Get all folders for the current user, including group folders they have access to."""
+    # Check if folders feature is enabled - return empty array if not
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify([])
+
+    # Get user's personal folders
+    from src.services.recording_list import folder_dicts, folder_load_options
+    user_folders = (Folder.query.filter_by(user_id=current_user.id, group_id=None)
+                    .options(*folder_load_options()).order_by(Folder.name).all())
+
+    # Get user's team memberships with roles
+    memberships = GroupMembership.query.filter_by(user_id=current_user.id).all()
+    team_roles = {m.group_id: m.role for m in memberships}
+    team_ids = list(team_roles.keys())
+
+    # Get group folders for all teams the user is a member of
+    team_folders = []
+    if team_ids:
+        team_folders = (Folder.query.filter(Folder.group_id.in_(team_ids))
+                        .options(*folder_load_options()).order_by(Folder.name).all())
+
+    # Build response with edit permissions
+    result = []
+    dicts = dict(zip([f.id for f in user_folders + team_folders], folder_dicts(user_folders + team_folders)))
+
+    # Personal folders - user can always edit their own
+    for folder in user_folders:
+        folder_dict = dicts[folder.id]
+        folder_dict['can_edit'] = True
+        folder_dict['user_role'] = None
+        result.append(folder_dict)
+
+    # Group folders - only admins can edit
+    for folder in team_folders:
+        folder_dict = dicts[folder.id]
+        user_role = team_roles.get(folder.group_id, 'member')
+        folder_dict['can_edit'] = (user_role == 'admin')
+        folder_dict['user_role'] = user_role
+        result.append(folder_dict)
+
+    return jsonify(result)
+
+
+@folders_bp.route('/api/folders', methods=['POST'])
+@login_required
+def create_folder():
+    """Create a new folder (personal or group folder)."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(api_error('folder_name_required')), 400
+
+    name, error_key = _clean_folder_name(data.get('name'))
+    if error_key:
+        return _folder_name_error(error_key)
+    color, error_key = _clean_folder_color(data.get('color'))
+    if error_key:
+        return jsonify(api_error(error_key)), 400
+
+    group_id = data.get('group_id')
+
+    # If creating a group folder, verify user is admin of that group
+    if group_id:
+        membership = GroupMembership.query.filter_by(
+            group_id=group_id,
+            user_id=current_user.id
+        ).first()
+
+        if not membership or membership.role != 'admin':
+            return jsonify(api_error('group_folder_create_admin_only')), 403
+
+        # Check if group folder with same name already exists for this group
+        existing_folder = Folder.query.filter_by(name=name, group_id=group_id).first()
+        if existing_folder:
+            return jsonify(api_error('folder_name_exists_for_group')), 400
+    else:
+        # Check if personal folder with same name already exists for this user
+        existing_folder = Folder.query.filter_by(name=name, user_id=current_user.id, group_id=None).first()
+        if existing_folder:
+            return jsonify(api_error('folder_name_exists')), 400
+
+    parent, parent_error = _parent_for_write(data.get('parent_id'), current_user.id, group_id)
+    if parent_error:
+        return jsonify(api_error(parent_error)), 400
+
+    # Handle retention_days: -1 means protected from deletion
+    retention_days = data.get('retention_days')
+    protect_from_deletion = False
+
+    if retention_days == -1:
+        # -1 indicates infinite retention (protected from auto-deletion)
+        protect_from_deletion = True if _self.ENABLE_AUTO_DELETION else False
+
+    # Validate naming_template_id if provided
+    naming_template_id = data.get('naming_template_id')
+    if naming_template_id:
+        template = NamingTemplate.query.filter_by(id=naming_template_id, user_id=current_user.id).first()
+        if not template:
+            return jsonify(api_error('naming_template_not_found')), 404
+
+    # Validate export_template_id if provided
+    export_template_id = data.get('export_template_id')
+    if export_template_id:
+        template = ExportTemplate.query.filter_by(id=export_template_id, user_id=current_user.id).first()
+        if not template:
+            return jsonify(api_error('export_template_not_found')), 404
+
+    folder = Folder(
+        name=name,
+        user_id=current_user.id,
+        group_id=group_id,
+        parent_id=parent.id if parent else None,
+        color=color,
+        custom_prompt=data.get('custom_prompt'),
+        title_prompt=data.get('title_prompt'),
+        default_language=data.get('default_language'),
+        default_min_speakers=data.get('default_min_speakers'),
+        default_max_speakers=data.get('default_max_speakers'),
+        default_hotwords=data.get('default_hotwords'),
+        default_initial_prompt=data.get('default_initial_prompt'),
+        default_transcription_model=data.get('default_transcription_model'),
+        protect_from_deletion=protect_from_deletion,
+        retention_days=retention_days,
+        auto_share_on_apply=data.get('auto_share_on_apply', True) if group_id else True,
+        share_with_group_lead=data.get('share_with_group_lead', True) if group_id else True,
+        naming_template_id=naming_template_id,
+        export_template_id=export_template_id
+    )
+
+    db.session.add(folder)
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A duplicate name is a refused request, not an application error (#511).
+        db.session.rollback()
+        current_app.logger.info("Folder create refused: the name is already in use")
+        return jsonify(api_error(_name_taken_key(name, group_id, 'folder_name_exists_for_group'))), 400
+
+    return jsonify(_folder_response(folder)), 201
+
+
+@folders_bp.route('/api/folders/<int:folder_id>', methods=['PUT'])
+@login_required
+def update_folder(folder_id):
+    """Update a folder."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    folder = db.session.get(Folder, folder_id)
+    if not folder:
+        return jsonify(api_error('folder_not_found')), 404
+
+    # Check permissions
+    if folder.group_id:
+        # Group folder - user must be a team admin
+        membership = GroupMembership.query.filter_by(
+            group_id=folder.group_id,
+            user_id=current_user.id
+        ).first()
+
+        if not membership or membership.role != 'admin':
+            return jsonify(api_error('group_folder_edit_admin_only')), 403
+    else:
+        # Personal folder - must be the owner
+        if folder.user_id != current_user.id:
+            return jsonify(api_error('folder_edit_denied')), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
+    before = sharing_state(folder)
+
+    if 'name' in data:
+        # A stored name from before the length check (#512) can be sent back
+        # unchanged with the rest of the form.
+        if isinstance(data['name'], str) and data['name'].strip() == folder.name:
+            new_name = folder.name
+        else:
+            new_name, error_key = _clean_folder_name(data['name'])
+            if error_key:
+                return _folder_name_error(error_key)
+
+        # Check if new name conflicts with another folder. Personal names
+        # are unique among the user's personal folders only (#513).
+        if folder.group_id:
+            existing_folder = Folder.query.filter_by(name=new_name, group_id=folder.group_id).filter(Folder.id != folder_id).first()
+        else:
+            existing_folder = Folder.query.filter_by(name=new_name, user_id=current_user.id, group_id=None).filter(Folder.id != folder_id).first()
+
+        if existing_folder:
+            return jsonify(api_error('folder_rename_conflict')), 400
+        folder.name = new_name
+
+    # Handle group_id changes (converting between personal and group folders)
+    if 'group_id' in data:
+        new_group_id = data['group_id'] if data['group_id'] else None
+        # str() lets a group id sent as "3" match 3.
+        if str(new_group_id or '') != str(folder.group_id or ''):
+            # Admin of the new group, with edit access to other users' recordings in the folder
+            error_key = regroup_error(folder, new_group_id, current_user, has_recording_access)
+            if error_key:
+                return jsonify(api_error(error_key)), 403
+            # Children stay in the old scope, so a folder with children keeps
+            # its group (#585).
+            if Folder.query.filter_by(parent_id=folder.id).first():
+                return jsonify(api_error('folder_group_tree_invalid')), 400
+
+    # The parent is checked against the folder's new scope when either one
+    # changes, before anything is written.
+    check_parent = 'parent_id' in data or ('group_id' in data and folder.parent_id is not None)
+    if check_parent:
+        target_group_id = new_group_id if 'group_id' in data else folder.group_id
+        parent, parent_error = _parent_for_write(data.get('parent_id', folder.parent_id),
+                                                 folder.user_id, target_group_id)
+        if parent_error:
+            return jsonify(api_error(parent_error)), 400
+        if parent:
+            from src.services.folder_tree import descendant_folder_ids
+            if parent.id in descendant_folder_ids(folder):
+                return jsonify(api_error('folder_parent_cycle')), 400
+
+    if 'group_id' in data:
+        folder.group_id = new_group_id
+    if check_parent:
+        folder.parent_id = parent.id if parent else None
+
+    if 'color' in data:
+        color, error_key = _clean_folder_color(data['color'])
+        if error_key:
+            return jsonify(api_error(error_key)), 400
+        folder.color = color
+    if 'custom_prompt' in data:
+        folder.custom_prompt = data['custom_prompt']
+    if 'title_prompt' in data:
+        folder.title_prompt = data['title_prompt'] or None
+    if 'default_language' in data:
+        folder.default_language = data['default_language']
+    if 'default_min_speakers' in data:
+        folder.default_min_speakers = data['default_min_speakers']
+    if 'default_max_speakers' in data:
+        folder.default_max_speakers = data['default_max_speakers']
+    if 'default_hotwords' in data:
+        folder.default_hotwords = data['default_hotwords'] or None
+    if 'default_initial_prompt' in data:
+        folder.default_initial_prompt = data['default_initial_prompt'] or None
+    if 'default_transcription_model' in data:
+        folder.default_transcription_model = data['default_transcription_model'] or None
+
+    # Handle retention_days: -1 means protected from deletion
+    if 'retention_days' in data:
+        retention_days = data['retention_days']
+
+        if retention_days == -1:
+            # -1 indicates infinite retention (protected from auto-deletion)
+            if _self.ENABLE_AUTO_DELETION:
+                folder.protect_from_deletion = True
+                folder.retention_days = -1
+        else:
+            # Regular retention period or null (use global)
+            folder.protect_from_deletion = False
+            folder.retention_days = retention_days if retention_days else None
+    if 'auto_share_on_apply' in data:
+        # Only applicable to group folders
+        if folder.group_id:
+            folder.auto_share_on_apply = bool(data['auto_share_on_apply'])
+    if 'share_with_group_lead' in data:
+        # Only applicable to group folders
+        if folder.group_id:
+            folder.share_with_group_lead = bool(data['share_with_group_lead'])
+    if 'naming_template_id' in data:
+        naming_template_id = data['naming_template_id']
+        if naming_template_id:
+            template = NamingTemplate.query.filter_by(id=naming_template_id, user_id=current_user.id).first()
+            if not template:
+                return jsonify(api_error('naming_template_not_found')), 404
+        folder.naming_template_id = naming_template_id if naming_template_id else None
+    if 'export_template_id' in data:
+        export_template_id = data['export_template_id']
+        if export_template_id:
+            template = ExportTemplate.query.filter_by(id=export_template_id, user_id=current_user.id).first()
+            if not template:
+                return jsonify(api_error('export_template_not_found')), 404
+        folder.export_template_id = export_template_id if export_template_id else None
+
+    folder.updated_at = datetime.utcnow()
+    name, group_id = folder.name, folder.group_id
+
+    try:
+        # A name clash surfaces here; the settings lookup below would hide it
+        db.session.flush()
+        # A new group or new share settings: the shares follow (#582, #586)
+        _removed, created = sync_source_shares(folder, before, sharing_enabled=_self.ENABLE_INTERNAL_SHARING)
+        # API v1 delegates here: a token without the share scope may not create shares
+        refusal = share_scope_refusal(created)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
+        db.session.commit()
+    except IntegrityError:
+        # A duplicate name is a refused request, not an application error (#511).
+        db.session.rollback()
+        current_app.logger.info("Folder update refused: the name is already in use")
+        return jsonify(api_error(_name_taken_key(name, group_id, 'folder_rename_conflict'))), 400
+
+    return jsonify(_folder_response(folder))
+
+
+@folders_bp.route('/api/folders/<int:folder_id>', methods=['DELETE'])
+@login_required
+def delete_folder(folder_id):
+    """Delete a folder. Recordings in this folder will have folder_id set to NULL."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    folder = db.session.get(Folder, folder_id)
+    if not folder:
+        return jsonify(api_error('folder_not_found')), 404
+
+    # Check permissions
+    if folder.group_id:
+        # Group folder - user must be a team admin
+        membership = GroupMembership.query.filter_by(
+            group_id=folder.group_id,
+            user_id=current_user.id
+        ).first()
+
+        if not membership or membership.role != 'admin':
+            return jsonify(api_error('group_folder_delete_admin_only')), 403
+    else:
+        # Personal folder - must belong to the user
+        if folder.user_id != current_user.id:
+            return jsonify(api_error('folder_delete_denied')), 403
+
+    # Recordings in this folder will have folder_id set to NULL via ondelete='SET NULL'.
+    # Child folders move up to this folder's parent (Folder before_delete, #585).
+    recording_ids = [rid for (rid,) in db.session.query(Recording.id).filter(Recording.folder_id == folder.id)]
+    recording_ids += [rid for (rid,) in db.session.query(InternalShare.recording_id).filter(
+        InternalShare.source_folder_id == folder.id)]
+    db.session.delete(folder)
+    # The folder no longer shares what it held (#582)
+    drop_stale_auto_shares(recording_ids=recording_ids)
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+@folders_bp.route('/api/groups/<int:group_id>/folders', methods=['POST'])
+@login_required
+def create_group_folder(group_id):
+    """Create a group-scoped folder (group admins only)."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    if not _self.ENABLE_INTERNAL_SHARING:
+        return jsonify(api_error('group_folders_require_internal_sharing')), 403
+
+    # Verify team exists
+    team = db.session.get(Group, group_id)
+    if not team:
+        return jsonify(api_error('group_not_found')), 404
+
+    # Verify user is a team admin
+    membership = GroupMembership.query.filter_by(
+        group_id=group_id,
+        user_id=current_user.id
+    ).first()
+
+    if not membership or membership.role != 'admin':
+        return jsonify(api_error('group_folder_create_admin_only')), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(api_error('folder_name_required')), 400
+
+    name, error_key = _clean_folder_name(data.get('name'))
+    if error_key:
+        return _folder_name_error(error_key)
+    color, error_key = _clean_folder_color(data.get('color'))
+    if error_key:
+        return jsonify(api_error(error_key)), 400
+
+    # Check if a group folder with this name already exists for this team
+    existing_folder = Folder.query.filter_by(
+        name=name,
+        group_id=group_id
+    ).first()
+
+    if existing_folder:
+        return jsonify(api_error('group_folder_name_exists')), 400
+
+    parent, parent_error = _parent_for_write(data.get('parent_id'), current_user.id, group_id)
+    if parent_error:
+        return jsonify(api_error(parent_error)), 400
+
+    # Validate naming_template_id if provided
+    naming_template_id = data.get('naming_template_id')
+    if naming_template_id:
+        template = NamingTemplate.query.filter_by(id=naming_template_id, user_id=current_user.id).first()
+        if not template:
+            return jsonify(api_error('naming_template_not_found')), 404
+
+    # Validate export_template_id if provided
+    export_template_id = data.get('export_template_id')
+    if export_template_id:
+        template = ExportTemplate.query.filter_by(id=export_template_id, user_id=current_user.id).first()
+        if not template:
+            return jsonify(api_error('export_template_not_found')), 404
+
+    # Create the group folder with all supported parameters
+    folder = Folder(
+        name=name,
+        user_id=current_user.id,  # Creator
+        group_id=group_id,
+        parent_id=parent.id if parent else None,
+        color=color,
+        custom_prompt=data.get('custom_prompt'),
+        title_prompt=data.get('title_prompt'),
+        default_language=data.get('default_language'),
+        default_min_speakers=data.get('default_min_speakers'),
+        default_max_speakers=data.get('default_max_speakers'),
+        default_hotwords=data.get('default_hotwords'),
+        default_initial_prompt=data.get('default_initial_prompt'),
+        default_transcription_model=data.get('default_transcription_model'),
+        protect_from_deletion=data.get('protect_from_deletion', False),
+        retention_days=data.get('retention_days'),
+        auto_share_on_apply=data.get('auto_share_on_apply', True),  # Default to True for group folders
+        share_with_group_lead=data.get('share_with_group_lead', True),  # Default to True for group folders
+        naming_template_id=naming_template_id,
+        export_template_id=export_template_id
+    )
+
+    db.session.add(folder)
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A duplicate name is a refused request, not an application error (#511).
+        db.session.rollback()
+        current_app.logger.info("Group folder create refused: the name is already in use")
+        return jsonify(api_error(_name_taken_key(name, group_id, 'group_folder_name_exists'))), 400
+
+    return jsonify(_folder_response(folder)), 201
+
+
+@folders_bp.route('/api/groups/<int:group_id>/folders', methods=['GET'])
+@login_required
+def get_group_folders(group_id):
+    """Get all folders for a team (team members only)."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    # Verify team exists
+    team = db.session.get(Group, group_id)
+    if not team:
+        return jsonify(api_error('group_not_found')), 404
+
+    # Verify user is a team member
+    membership = GroupMembership.query.filter_by(
+        group_id=group_id,
+        user_id=current_user.id
+    ).first()
+
+    if not membership:
+        return jsonify(api_error('group_folders_members_only')), 403
+
+    # Get all group folders
+    from src.services.recording_list import folder_dicts, folder_load_options
+    folders = Folder.query.filter_by(group_id=group_id).options(*folder_load_options()).order_by(Folder.id).all()
+
+    return jsonify({'folders': folder_dicts(folders)})
+
+
+@folders_bp.route('/api/recordings/<int:recording_id>/folder', methods=['PUT'])
+@login_required
+def assign_recording_folder(recording_id):
+    """Assign a recording to a folder (or move to a different folder)."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    recording = db.session.get(Recording, recording_id)
+    if not recording:
+        return jsonify(api_error('recording_not_found')), 404
+
+    # Check access to recording (require edit permission). A recording the
+    # caller cannot see answers like a missing id.
+    if has_recording_access:
+        if not has_recording_access(recording, current_user):
+            return jsonify(api_error('recording_not_found')), 404
+        if not has_recording_access(recording, current_user, require_edit=True):
+            return jsonify(api_error('recording_modify_denied')), 403
+    else:
+        # Fallback: only owner can assign folder
+        if recording.user_id != current_user.id:
+            return jsonify(api_error('recording_modify_denied')), 403
+
+    data = request.get_json()
+    folder_id = data.get('folder_id')
+
+    if folder_id:
+        # Verify folder exists and user has access
+        folder = db.session.get(Folder, folder_id)
+        if not folder:
+            return jsonify(api_error('folder_not_found')), 404
+
+        # Check if user can put this recording in this folder
+        error_key = folder_assign_error(recording, folder, current_user, 'folder_access_denied')
+        if error_key:
+            return jsonify(api_error(error_key)), 403
+
+        # Handle auto-sharing for group folders
+        old_folder_id = recording.folder_id
+        recording.folder_id = folder_id
+
+        # Apply auto-shares if moving to a group folder
+        if folder.group_id and (folder.auto_share_on_apply or folder.share_with_group_lead):
+            _apply_folder_auto_shares(recording, folder)
+
+        # Leaving a group folder ends the shares it made (#582)
+        drop_stale_auto_shares(recording_ids=[recording.id])
+        db.session.commit()
+        current_app.logger.info(f"Recording {recording_id} moved to folder {folder_id} by user {current_user.id}")
+    else:
+        # Remove from folder
+        recording.folder_id = None
+        drop_stale_auto_shares(recording_ids=[recording.id])
+        db.session.commit()
+        current_app.logger.info(f"Recording {recording_id} removed from folder by user {current_user.id}")
+
+    return jsonify(recording.to_dict(include_html=False, viewer_user=current_user))
+
+
+@folders_bp.route('/api/recordings/<int:recording_id>/folder', methods=['DELETE'])
+@login_required
+def remove_recording_folder(recording_id):
+    """Remove a recording from its folder."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    recording = db.session.get(Recording, recording_id)
+    if not recording:
+        return jsonify(api_error('recording_not_found')), 404
+
+    # Check access to recording (require edit permission). A recording the
+    # caller cannot see answers like a missing id.
+    if has_recording_access:
+        if not has_recording_access(recording, current_user):
+            return jsonify(api_error('recording_not_found')), 404
+        if not has_recording_access(recording, current_user, require_edit=True):
+            return jsonify(api_error('recording_modify_denied')), 403
+    else:
+        # Fallback: only owner can remove folder
+        if recording.user_id != current_user.id:
+            return jsonify(api_error('recording_modify_denied')), 403
+
+    recording.folder_id = None
+    # Leaving a group folder ends the shares it made (#582)
+    drop_stale_auto_shares(recording_ids=[recording.id])
+    db.session.commit()
+    current_app.logger.info(f"Recording {recording_id} removed from folder by user {current_user.id}")
+
+    return jsonify({'success': True})
+
+
+@folders_bp.route('/api/recordings/bulk/folder', methods=['POST'])
+@login_required
+def bulk_assign_folder():
+    """Assign multiple recordings to a folder."""
+    # Check if folders feature is enabled
+    folders_enabled = SystemSetting.get_setting('enable_folders', False)
+    if not folders_enabled:
+        return jsonify(api_error('folders_disabled')), 403
+
+    data = request.get_json()
+    recording_ids = data.get('recording_ids', [])
+    folder_id = data.get('folder_id')  # Can be None to remove from folder
+
+    if not recording_ids:
+        return jsonify(api_error('no_recordings_specified')), 400
+
+    # Verify folder if specified
+    folder = None
+    if folder_id:
+        folder = db.session.get(Folder, folder_id)
+        if not folder:
+            return jsonify(api_error('folder_not_found')), 404
+
+        # Check if user can use this folder
+        if folder.group_id:
+            membership = GroupMembership.query.filter_by(
+                group_id=folder.group_id,
+                user_id=current_user.id
+            ).first()
+            if not membership:
+                return jsonify(api_error('folder_access_denied')), 403
+        else:
+            if folder.user_id != current_user.id:
+                return jsonify(api_error('folder_access_denied')), 403
+
+    recordings = []
+    for rec_id in recording_ids:
+        recording = db.session.get(Recording, rec_id)
+        if not recording:
+            continue
+
+        # Check access (require edit permission)
+        if has_recording_access:
+            if not has_recording_access(recording, current_user, require_edit=True):
+                continue
+        else:
+            if recording.user_id != current_user.id:
+                continue
+
+        # Another user's recording: refuse the whole move before changing any
+        if folder is not None:
+            error_key = folder_assign_error(recording, folder, current_user, 'folder_access_denied')
+            if error_key:
+                return jsonify(api_error(error_key)), 403
+        recordings.append(recording)
+
+    updated_count = 0
+    for recording in recordings:
+        recording.folder_id = folder_id
+
+        # Apply auto-shares if moving to a group folder
+        if folder and folder.group_id and (folder.auto_share_on_apply or folder.share_with_group_lead):
+            _apply_folder_auto_shares(recording, folder)
+
+        updated_count += 1
+
+    # Leaving a group folder ends the shares it made (#582)
+    drop_stale_auto_shares(recording_ids=[r.id for r in recordings])
+    db.session.commit()
+    action = f"moved to folder {folder_id}" if folder_id else "removed from folder"
+    current_app.logger.info(f"Bulk folder update: {updated_count} recordings {action} by user {current_user.id}")
+
+    return jsonify({'success': True, 'updated_count': updated_count})
+
+
+def folder_assign_error(recording, folder, user, denied_key):
+    """Why `user` may not put `recording` into `folder`, as an error key, or None.
+
+    The group-tag rule applies (#515): your own recordings go into your own
+    folders and your groups' folders; another user's recording goes only into
+    a group folder, and only from an admin of that group. Without it, an
+    editor of a shared recording could share it with a whole group by moving
+    it. Edit access to the recording is checked by each move path.
+    denied_key is the path's error for a folder the user cannot use at all.
+    """
+    if folder.group_id:
+        membership = GroupMembership.query.filter_by(
+            group_id=folder.group_id, user_id=user.id
+        ).first()
+        if not membership:
+            return denied_key
+        if recording.user_id != user.id and membership.role != 'admin':
+            return 'folder_assign_restricted'
+        return None
+    if folder.user_id != user.id:
+        return denied_key
+    if recording.user_id != user.id:
+        return 'folder_assign_restricted'
+    return None
+
+
+def apply_group_folder_shares(recording, folder):
+    """Share a recording placed in a group folder, as that folder's settings say.
+
+    Every path that puts a recording in a folder calls this, so the v1 API and
+    uploads share the same way as moving it in the web app (#515).
+    """
+    if folder is not None and folder.group_id and (folder.auto_share_on_apply or folder.share_with_group_lead):
+        _apply_folder_auto_shares(recording, folder)
+
+
+def _apply_folder_auto_shares(recording, folder):
+    """Apply a group folder's auto-shares to a recording assigned to it (see apply_folder_shares)."""
+    created = apply_folder_shares(recording, folder, sharing_enabled=_self.ENABLE_INTERNAL_SHARING)
+    if created > 0:
+        current_app.logger.info(f"Created {created} auto-shares for recording {recording.id} via folder assignment")
+
+
+# Hot-applied System Settings (high priority) with environment fallback.
+from src.utils.system_settings import apply_hot_settings
+_SYSTEM_SETTING_MAP = {
+    "ENABLE_INTERNAL_SHARING": ('enable_internal_sharing', 'ENABLE_INTERNAL_SHARING', False),
+    "ENABLE_AUTO_DELETION": ('enable_auto_deletion', 'ENABLE_AUTO_DELETION', False),
+}
+_self, __getattr__ = apply_hot_settings(__name__, _SYSTEM_SETTING_MAP)

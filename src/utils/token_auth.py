@@ -1,0 +1,479 @@
+"""
+Token authentication utilities.
+
+This module provides token-based authentication for API access,
+allowing users to authenticate with Bearer tokens instead of session cookies.
+"""
+
+import hashlib
+import logging
+import os
+import threading
+from datetime import datetime
+from functools import wraps
+from flask import request, g, has_request_context
+from src.models import APIToken, User
+
+logger = logging.getLogger(__name__)
+
+# ?token= is deprecated (#500). It is accepted only on these read-only methods;
+# a token supplied only as ?token= on any other method is refused with 401.
+QUERY_TOKEN_METHODS = frozenset({'GET', 'HEAD'})
+
+# Token ids already reported as using ?token=, so the warning appears once per
+# token per process.
+_query_token_warned = set()
+_query_token_warned_lock = threading.Lock()
+
+
+def extract_token_from_request(headers_only=False):
+    """
+    Extract API token from various possible locations in the request.
+
+    Checks in order:
+    1. Authorization header with Bearer scheme
+    2. X-API-Token header
+    3. API-Token header
+    4. 'token' query parameter (only when ``headers_only=False``);
+       deprecated, and honoured only on GET and HEAD by
+       :func:`resolve_request_token`
+
+    The ``headers_only`` flag exists because the query-string token can
+    be triggered by a Simple Cross-Origin Request without CORS preflight
+    (see GHSA-x4q4-3ww4-h329). Code paths that make security decisions
+    based on whether a request is API-token-authenticated MUST pass
+    ``headers_only=True`` so an attacker cannot place ``?token=...`` on
+    a victim-browser URL to fake API authentication.
+
+    Returns:
+        str: The extracted token, or None if not found
+    """
+    # Check Authorization header (Bearer token)
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        return auth_header[7:]  # Remove 'Bearer ' prefix
+
+    # Check X-API-Token header
+    token = request.headers.get('X-API-Token')
+    if token:
+        return token
+
+    # Check API-Token header
+    token = request.headers.get('API-Token')
+    if token:
+        return token
+
+    if headers_only:
+        return None
+
+    # Check query parameter
+    token = request.args.get('token')
+    if token:
+        return token
+
+    return None
+
+
+def hash_token(token):
+    """
+    Hash a token using SHA-256.
+
+    Args:
+        token (str): The plaintext token to hash
+
+    Returns:
+        str: The hexadecimal hash of the token
+    """
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def find_api_token(token):
+    """The valid APIToken row for a plaintext token, or None."""
+    if not token:
+        return None
+    api_token = APIToken.query.filter_by(token_hash=hash_token(token)).first()
+    if not api_token or not api_token.is_valid():
+        return None
+    return api_token
+
+
+def _mark_used(api_token):
+    if getattr(api_token, 'is_sso', False):
+        return  # an SSO access token has no row
+    if api_token.last_used_at is None:
+        # Once per token. The creation time is part of the key, because the
+        # id of a revoked token is given out again on SQLite. The actor is
+        # given, because this runs while Flask-Login is still loading the
+        # user of the request.
+        from src.services import audit
+        audit.record('token.first_used', actor_kind='api_token', actor_user_id=api_token.user_id,
+                     actor_token_id=api_token.id, details={'token_id': api_token.id},
+                     dedup=audit.DEDUP_ONCE, dedup_extra=audit.stamp(api_token.created_at))
+    api_token.last_used_at = datetime.utcnow()
+    from src.database import db
+    db.session.commit()
+
+
+def load_user_from_token_value(token):
+    """Validate a plaintext API token and return its associated user.
+
+    The caller controls where the token came from. Keeping this separate from
+    request extraction lets narrow integrations authenticate an explicit field
+    without making that field a global token source for every route. The
+    matched row is kept on flask.g.api_token for scope and rate-limit checks.
+    """
+    api_token = find_api_token(token)
+    if api_token is None:
+        return None
+    _mark_used(api_token)
+    if has_request_context():
+        g.api_token = api_token
+        request.environ['_speakr_secret_token'] = api_token
+    return api_token.user
+
+
+def resolve_request_token():
+    """The API token of this request and whether it came from ?token=.
+
+    Resolved once per request and cached on the request itself (its WSGI
+    environ), never on flask.g: g lives as long as the app context, which a
+    test or a background job can keep across several requests, and a token
+    from an earlier request must never authenticate a later one. The scope
+    check, the rate-limit key and Flask-Login's request_loader all use the
+    same row. Returns (APIToken or None, via_query).
+    """
+    env = request.environ
+    if '_speakr_api_token' not in env and _is_public_route():
+        env['_speakr_api_token'] = (None, False)
+    if '_speakr_api_token' not in env:
+        header_value = extract_token_from_request(headers_only=True)
+        value = header_value or extract_token_from_request()
+        api_token = find_api_token(value)
+        if api_token is None and header_value:
+            # An SSO access token (src/auth/sso_access_tokens.py), when the
+            # feature is on. Accepted only as Authorization: Bearer.
+            api_token = sso_token_from_request()
+        via_query = bool(api_token is not None and not header_value)
+        if via_query and not query_tokens_enabled():
+            # api_query_tokens_enabled is off: a token in the URL
+            # authenticates nothing on any method. Answered with 401
+            # query_token_disabled by refuse_query_token_writes.
+            env['_speakr_query_token_used'] = True
+            if request.method != 'OPTIONS':
+                env['_speakr_query_token_disabled'] = True
+            api_token, via_query = None, False
+        if via_query:
+            # Deprecated (#500): marked for the Deprecation header, and
+            # accepted only on GET and HEAD. On any other method the token
+            # authenticates nothing; refuse_query_token_writes answers 401.
+            env['_speakr_query_token_used'] = True
+            _warn_query_token(api_token)
+            if request.method not in QUERY_TOKEN_METHODS:
+                # OPTIONS (a CORS preflight) authenticates nothing anyway
+                # and is not answered with 401.
+                if request.method != 'OPTIONS':
+                    env['_speakr_query_token_refused'] = True
+                api_token, via_query = None, False
+        env['_speakr_api_token'] = (api_token, via_query)
+    api_token, via_query = env['_speakr_api_token']
+    g.api_token = api_token
+    g.api_token_via_query = via_query
+    return api_token, via_query
+
+
+def sso_token_from_request():
+    """The validated SSO access token in the Authorization: Bearer header of
+    this request, or None. The other token headers and ?token= never carry one."""
+    from src.auth.sso_access_tokens import looks_like_jwt, token_for_request
+    auth_header = request.headers.get('Authorization', '')
+    value = auth_header[7:] if auth_header.startswith('Bearer ') else None
+    if not looks_like_jwt(value):
+        return None
+    return token_for_request(value)
+
+
+def is_sso_token(api_token):
+    """True for an SSO access token, False for an APIToken row or None."""
+    return bool(getattr(api_token, 'is_sso', False))
+
+
+def _warn_query_token(api_token):
+    """Log, once per token per process, that a token arrived as ?token=."""
+    with _query_token_warned_lock:
+        if api_token.id in _query_token_warned:
+            return
+        _query_token_warned.add(api_token.id)
+    logger.warning(
+        'API token %s (user %s) was sent as the deprecated ?token= query parameter '
+        'on %s %s; send it in the Authorization header instead.',
+        api_token.id, api_token.user_id, request.method, request.path)
+
+
+def query_tokens_enabled():
+    """api_query_tokens_enabled (API_QUERY_TOKENS_ENABLED); on unless turned off."""
+    from src.models import SystemSetting
+    from src.utils.system_settings import ENV_BACKED_SETTINGS, env_fallback
+    env_var, default = ENV_BACKED_SETTINGS['api_query_tokens_enabled'][:2]
+    fallback = env_fallback(env_var, default)
+    try:
+        value = SystemSetting.get_setting('api_query_tokens_enabled', fallback)
+    except Exception:
+        return bool(fallback)
+    return bool(fallback if value is None else value)
+
+
+def query_token_disabled():
+    """True when this request supplied a valid token only as ?token= while
+    api_query_tokens_enabled is off."""
+    resolve_request_token()
+    return bool(request.environ.get('_speakr_query_token_disabled'))
+
+
+def query_token_refused():
+    """True when this request supplied a valid token only as ?token= on a
+    method other than GET or HEAD (#500)."""
+    resolve_request_token()
+    return bool(request.environ.get('_speakr_query_token_refused'))
+
+
+def query_token_used():
+    """True when this request supplied a valid token as ?token=, accepted or not."""
+    return bool(request.environ.get('_speakr_query_token_used'))
+
+
+def current_api_token():
+    """The API token authenticating this request, or None for a session request."""
+    if not has_request_context():
+        return None
+    from flask import session
+    if session.get('_user_id'):
+        return None
+    return resolve_request_token()[0]
+
+
+def load_user_from_token():
+    """
+    Load a user from an API token in the request.
+
+    This function is used by Flask-Login's request_loader to authenticate
+    users via API tokens instead of sessions.
+
+    Returns:
+        User: The authenticated user, or None if authentication fails
+    """
+    api_token, _ = resolve_request_token()
+    if api_token is None:
+        return None
+    _mark_used(api_token)
+    return api_token.user
+
+
+# --- Scopes (mailr spec G1) -------------------------------------------------
+
+# Per-token limits by kind of route; configurable by env. Applied only to
+# requests authenticated by a token, keyed by the token id.
+_RATE_LIMITS = {
+    'read': os.environ.get('API_TOKEN_RATE_LIMIT_READ', '120 per minute'),
+    'write': os.environ.get('API_TOKEN_RATE_LIMIT_WRITE', '30 per minute'),
+    'process': os.environ.get('API_TOKEN_RATE_LIMIT_PROCESS', '10 per minute'),
+}
+
+
+def _doubled(limit_string):
+    """The same limit with twice the requests, or None when it cannot be parsed."""
+    from limits import parse_many
+    try:
+        items = parse_many(limit_string)
+    except ValueError:
+        return None
+    return '; '.join(
+        f"{2 * item.amount} per {'' if item.multiples == 1 else f'{item.multiples} '}{item.GRANULARITY.name}"
+        for item in items)
+
+
+# Account limits (#484): on each endpoint, all tokens of one user draw on one
+# budget per kind, so another token adds no throughput there. Like the token
+# budget it is counted per endpoint, so a client that polls several endpoints
+# is not held by it. The default is twice the per-token limit, so a client
+# with a single token is held by its token limit.
+_USER_RATE_LIMITS = {
+    kind: os.environ.get(f'API_USER_RATE_LIMIT_{kind.upper()}') or _doubled(limit) or limit
+    for kind, limit in _RATE_LIMITS.items()
+}
+
+
+def _rate_category(scopes):
+    if 'process' in scopes:
+        return 'process'
+    if not scopes or scopes == {'read'}:
+        return 'read'
+    return 'write'
+
+
+def token_rate_key():
+    """Rate-limit key: the token id for token requests, else the client address."""
+    api_token = current_api_token()
+    if api_token is not None:
+        return f"token:{api_token.id}"
+    from flask_limiter.util import get_remote_address
+    return get_remote_address()
+
+
+def user_rate_key():
+    """Rate-limit key for the account budget: the owner of the token."""
+    api_token = current_api_token()
+    if api_token is not None:
+        return f"user:{api_token.user_id}"
+    from flask_limiter.util import get_remote_address
+    return get_remote_address()
+
+
+def is_token_request():
+    """True when this request is authenticated by an API token (not a session)."""
+    return current_api_token() is not None
+
+
+def public_route(f):
+    """Mark a view that needs no authentication at all.
+
+    No token is read on such a route (resolve_request_token returns none), so
+    a token sent there has no effect: no scope check, no per-token or
+    per-account rate limit. The route sets its own per-IP limit. Marked with
+    no required scopes, so a scoped token's openapi.json still lists it."""
+    f._required_scopes = frozenset()
+    f._public_route = True
+    return f
+
+
+def _is_public_route():
+    from flask import current_app
+    view = current_app.view_functions.get(request.endpoint) if request.endpoint else None
+    return bool(getattr(view, '_public_route', False))
+
+
+def require_scope(*scopes):
+    """Mark a view with the scopes a scoped token needs, and apply the per-token
+    and the per-account rate limits for its kind (read, write or process).
+
+    require_scope() with no scopes accepts any valid token. The check itself runs
+    in the before_request hook in src/app.py, before the view, so a refused
+    request has no side effect. Full tokens and sessions are not restricted.
+    """
+    required = frozenset(scopes)
+    category = _rate_category(set(scopes))
+
+    # Built once, so a second registration (another limiter in tests) yields
+    # limits equal to the first and Flask-Limiter keeps one of each.
+    def token_limit():
+        return _RATE_LIMITS[category]
+
+    def user_limit():
+        return _USER_RATE_LIMITS[category]
+
+    def is_exempt():
+        return not is_token_request()
+
+    def token_scope(endpoint):
+        return f"token-{category}"
+
+    def token_message():
+        return f"Rate limit reached for this token: {_RATE_LIMITS[category]} ({category} requests)."
+
+    def user_scope(endpoint):
+        return f"user-{category}"
+
+    def user_message():
+        return (f"Rate limit reached for your account: {_USER_RATE_LIMITS[category]} "
+                f"({category} requests on this endpoint), shared by all your API tokens.")
+
+    def decorator(f):
+        state = {'limiter': None, 'limited': None}
+        # gthread workers serve the first requests of a route at the same time;
+        # registering the limits twice would count every request twice.
+        lock = threading.Lock()
+        # A route limit from a lazy rate_limit() decorator under this one
+        # (src/api/api_v1.py). Its own wrapper would run a second limiter check
+        # per request, and each check counts every limit of the route, so the
+        # route limit joins this stack instead and the view runs unwrapped.
+        # Only when f is that wrapper itself: a decorator in between (an
+        # access check, say) inherits its attributes through functools.wraps
+        # and must not be skipped.
+        route_limit = route_view = None
+        if getattr(f, '_rate_limit_wrapper', None) is f:
+            route_limit = f._rate_limit
+            route_view = f.__wrapped__
+
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            from src.app import limiter
+            if limiter is not None and getattr(limiter, 'enabled', True):
+                if state['limiter'] is not limiter:
+                    with lock:
+                        if state['limiter'] is not limiter:
+                            state['limited'] = _register(limiter)
+                            state['limiter'] = limiter
+                return state['limited'](*args, **kwargs)
+            return f(*args, **kwargs)
+
+        def _register(limiter):
+            # Both limits register under the view's name, so one check
+            # evaluates the two. With equal windows the token limit is checked
+            # first, and a request it refuses is not counted against the
+            # account. Both are counted per route: the bucket is the endpoint
+            # plus the token or the user.
+            target = f
+            if route_view is not None:
+                target = limiter.limit(route_limit, **getattr(f, '_rate_limit_options', {}))(route_view)
+            per_token = limiter.limit(
+                token_limit, key_func=token_rate_key, exempt_when=is_exempt,
+                scope=token_scope, error_message=token_message,
+            )(target)
+            return limiter.limit(
+                user_limit, key_func=user_rate_key, exempt_when=is_exempt,
+                scope=user_scope, error_message=user_message,
+            )(per_token)
+
+        wrapper._required_scopes = required
+        wrapper._limit_state = state
+        return wrapper
+    return decorator
+
+
+def scope_error_response(missing, api_token):
+    """The 403 answer for a scoped token without the needed scope."""
+    from flask import jsonify
+    names = sorted(missing or [])
+    message = (f"This token does not have the '{names[0]}' scope" if len(names) == 1
+               else f"This token does not have the scopes {', '.join(names)}" if names
+               else "This token cannot be used on this route; use a full-access token or a session")
+    resp = jsonify({'error': message, 'code': 'insufficient_scope',
+                    'required_scopes': names, 'token_scopes': sorted(api_token.scope_set or [])})
+    resp.status_code = 403
+    resp.headers['WWW-Authenticate'] = 'Bearer error="insufficient_scope"' + (
+        f', scope="{" ".join(names)}"' if names else '')
+    return resp
+
+
+def load_user_from_token_headers_only():
+    """Validate a header-only API token against the database.
+
+    Same DB lookup as :func:`load_user_from_token` but ignores the
+    ``?token=`` query parameter. Used by the CSRF protection hook
+    because Simple Cross-Origin Requests can carry an attacker-supplied
+    query string without triggering CORS preflight, while the three
+    accepted headers (Authorization, X-API-Token, API-Token) all do
+    trigger preflight and so cannot be set by a CSRF attack page.
+
+    Returns the authenticated User, or None. A valid SSO access token in a
+    header counts like an API token here (src/auth/sso_access_tokens.py).
+    """
+    value = extract_token_from_request(headers_only=True)
+    user = load_user_from_token_value(value)
+    if user is None and value:
+        # An SSO access token in a header is a programmatic client too.
+        sso_token = sso_token_from_request()
+        if sso_token is not None:
+            return sso_token.user
+    return user
+
+

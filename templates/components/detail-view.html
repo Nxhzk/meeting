@@ -1,0 +1,103 @@
+{% from 'components/queue/_queue.html' import queue_indicator %}
+<!-- Detail View Container -->
+<div v-if="currentView === 'detail' && selectedRecording" class="flex-1 flex flex-col overflow-hidden">
+    <!-- Incognito Mode Indicator Bar (theme-safe tint via --tint-incognito).
+         On a phone the details block carries the incognito mark and Actions
+         the discard button, so no second bar is drawn under the top bar. -->
+    <div v-if="selectedRecording.incognito && !isMobile"
+         class="border-b px-4 py-2 flex-shrink-0"
+         style="background: var(--tint-incognito); border-color: var(--tint-incognito-border);">
+        <div class="flex items-center justify-between gap-4 max-w-4xl mx-auto">
+            <div class="flex items-center gap-3">
+                <div class="w-7 h-7 rounded-full flex items-center justify-center" style="background: var(--tint-incognito-fg); opacity: 0.85;">
+                    <i class="fas fa-user-secret text-white text-xs"></i>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-sm font-medium" style="color: var(--tint-incognito-fg);">${ t('incognito.badge') }</span>
+                    <span class="text-xs" style="color: var(--tint-incognito-fg); opacity: 0.75;">
+                        &bull; ${ t('incognito.sessionOnly') } &bull; ${ t('incognito.notSavedToAccount') }
+                    </span>
+                </div>
+            </div>
+            <button @click="clearIncognitoRecordingWithConfirm"
+                    class="btn btn--icon btn--sm"
+                    style="color: var(--tint-incognito-fg);"
+                    :title="t('tooltips.discardIncognito')">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Phone view (below 768px, isMobile). One scrolling area holds the
+         details block and the open tab, so the details scroll away with the
+         text and the transcript's pinned bar (position: sticky) stays under
+         the top bar. Under it the player strip and the tab bar. The top bar
+         is components/phone/recording-bar.html (in components/header.html);
+         the sheets are components/phone/recording-sheets.html. The same
+         structure serves every UI theme; a theme styles it in its
+         stylesheet (static/css/phone.css has the base).
+         data-phone-record says whether the full record has arrived ('full')
+         or the page still shows the list's row of the recording ('row'). -->
+    <div v-if="isMobile" class="ph-detail" data-phone-detail
+         :data-phone-record="selectedRecording.transcription !== undefined ? 'full' : 'row'">
+        <div class="ph-scroll" :class="{ 'ph-scroll--fill': phoneFill }" data-phone-scroll
+             tabindex="0" role="region" :aria-label="selectedRecording.title || t('help.untitled')">
+            {% include 'components/phone/details.html' %}
+            {% include 'components/detail/mobile-summary-panel.html' %}
+            {% include 'components/detail/mobile-transcript-panel.html' %}
+            {% include 'components/detail/mobile-notes-panel.html' %}
+            {% include 'components/detail/mobile-chat-panel.html' %}
+        </div>
+
+        <!-- The indicator of the processing queue; it opens the queue sheet -->
+        <div v-if="showProcessingPopup" class="queue-dock queue-dock--recording" data-queue-dock>
+            {{ queue_indicator('strip') }}
+        </div>
+
+        <!-- Player strip -->
+        {% include 'components/detail/audio-player.html' %}
+
+        <!-- Tab bar -->
+        {% include 'components/detail/tab-navigation.html' %}
+
+        {% include 'components/phone/recording-sheets.html' %}
+    </div>
+
+    <!-- Desktop View -->
+    <div v-else class="flex-1 flex flex-col overflow-hidden">
+        {% with ui_slot = 'detail-meta' %}{% include 'themes/slot.html' %}{% endwith %}
+
+        <!-- Persistent audio player. By default sits at the BOTTOM of
+             the recording-detail screen, but the user can flip it to
+             the TOP from the Display tab in settings (preference
+             stored in user.audio_player_position; mirrored to the
+             reactive audioPlayerPosition ref). When 'top', the same
+             component renders ABOVE the main content split view so
+             it sits just under the title-meta strip. -->
+        <template v-if="audioPlayerPosition === 'top'">
+            {% include 'components/detail/desktop-bottom-player.html' %}
+        </template>
+
+        <!-- Main Content Split View -->
+        <div id="mainContentColumns" class="flex-1 flex overflow-hidden">
+            {% include 'components/detail/desktop-transcription-panel.html' %}
+
+            <!-- Resizable Divider. Carries a persistent themed seam
+                 (::before) for always-on visual separation between the
+                 transcript and summary columns; on hover / while
+                 dragging it thickens into an accent grab-handle. -->
+            <div id="mainColumnResizer" :class="{ 'is-resizing': isResizing }" @mousedown="startColumnResize"></div>
+
+            {% include 'components/detail/desktop-right-panel.html' %}
+        </div>
+
+        <template v-if="audioPlayerPosition !== 'top'">
+            {% include 'components/detail/desktop-bottom-player.html' %}
+        </template>
+    </div>
+
+    <!-- Floating dockable chat (teleported to body; desktop-only). -->
+    {% include 'components/detail/floating-chat.html' %}
+</div>
+
+{% include 'components/detail/empty-state.html' %}

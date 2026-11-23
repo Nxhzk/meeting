@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <!-- interactive-widget=resizes-content: keyboard resizes layout (Android). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
+    {% include 'includes/theme_account.html' %}
+    {% include 'includes/theme_bootstrap.html' %}
+    <script>
+      // Keyboard-safe viewport (see index.html for rationale): mirror the
+      // visible viewport height into --app-height so the keyboard never pushes
+      // the chat UI off-screen.
+      (function () {
+        var vv = window.visualViewport, root = document.documentElement;
+        function apply() { root.style.setProperty('--app-height', (vv ? vv.height : window.innerHeight) + 'px'); }
+        apply();
+        if (vv) { vv.addEventListener('resize', apply); vv.addEventListener('scroll', apply); }
+        window.addEventListener('orientationchange', function () { setTimeout(apply, 250); });
+      })();
+    </script>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+    <title>{{ page_title }} - Speakr</title>
+        <!-- All dependencies bundled locally for offline support -->
+        <!-- All dependencies bundled locally for offline support -->
+        <!-- All dependencies bundled locally for offline support -->
+        <!-- All dependencies bundled locally for offline support -->
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/css/fontawesome.min.css', v=app_version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=app_version) }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/primitives.css', v=app_version) }}">
+    <link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='img/icon-32x32.png') }}">
+
+    <!-- Loading overlay to prevent FOUC -->
+
+    <style>
+        /* Custom checkbox styling for better visual feedback */
+        .filter-checkbox {
+            appearance: none;
+            background-color: var(--bg-input);
+            border: 2px solid var(--border-secondary);
+            border-radius: 4px;
+            width: 16px;
+            height: 16px;
+            position: relative;
+            transition: all 0.2s ease;
+        }
+        
+        .filter-checkbox:checked {
+            background-color: var(--text-accent);
+            border-color: var(--text-accent);
+        }
+        
+        .filter-checkbox:checked::after {
+            content: '✓';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 10px;
+            font-weight: bold;
+        }
+        
+        .filter-checkbox:focus {
+            outline: 2px solid var(--text-accent);
+            outline-offset: 2px;
+        }
+        
+        .filter-checkbox:hover {
+            border-color: var(--text-accent);
+        }
+        
+        /* Enhanced markdown styling for Inquire Mode chat messages */
+        .chat-message .prose h1,
+        .chat-message .prose h2,
+        .chat-message .prose h3,
+        .chat-message .prose h4 {
+            color: var(--text-primary);
+            font-weight: 600;
+            margin-top: 1.5em;
+            margin-bottom: 0.75em;
+            line-height: 1.3;
+        }
+        
+        .chat-message .prose h1 { font-size: 1.25em; }
+        .chat-message .prose h2 { font-size: 1.15em; }
+        .chat-message .prose h3 { font-size: 1.05em; }
+        
+        .chat-message .prose p {
+            color: var(--text-primary);
+            margin-bottom: 1em;
+            line-height: 1.6;
+        }
+        
+        .chat-message .prose ul,
+        .chat-message .prose ol {
+            color: var(--text-primary);
+            margin: 0.75em 0;
+            padding-left: 1.5em;
+        }
+        
+        .chat-message .prose li {
+            color: var(--text-primary);
+            margin: 0.25em 0;
+            line-height: 1.6;
+        }
+        
+        .chat-message .prose strong {
+            color: var(--text-primary);
+            font-weight: 700;
+        }
+        
+        .chat-message .prose ul { list-style-type: disc; }
+        .chat-message .prose ol { list-style-type: decimal; }
+        
+        .chat-message .prose code {
+            background-color: var(--bg-accent);
+            color: var(--text-accent);
+            padding: 0.15em 0.3em;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+
+        /* Citation chips: the agent cites sources as markdown links to
+           /recordings/<id>; style them like small tag chips so they read
+           as references rather than inline hyperlinks. */
+        .chat-message .prose a[href^="/recordings/"] {
+            display: inline-block;
+            /* Theme accent tint (same pairing as selected options/highlights)
+               so the chip contrasts slightly with the bubble in every color
+               scheme, light and dark. */
+            background-color: var(--bg-accent);
+            color: var(--text-accent);
+            border: 1px solid var(--border-accent, var(--border-secondary));
+            border-radius: 9999px;
+            padding: 0 0.55em;
+            font-size: 0.78em;
+            line-height: 1.55;
+            text-decoration: none;
+            /* Sit on the text line instead of riding above it: an
+               inline-block chip aligned to baseline extends mostly upward
+               because of its padding, so nudge it down to visually centre
+               against the surrounding line. */
+            vertical-align: -0.35em;
+            margin: 0 0.1em;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .chat-message .prose a[href^="/recordings/"]:hover {
+            border-color: var(--border-focus);
+        }
+
+        /* Sources footer: numbered list mapping citation numbers to
+           recording titles. Links here render as plain links, not chips. */
+        .chat-message .citation-refs {
+            margin-top: 1em;
+            padding-top: 0.6em;
+            border-top: 1px solid var(--border-primary);
+        }
+        .chat-message .citation-refs__label {
+            font-size: 0.72em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            margin-bottom: 0.3em;
+        }
+        .chat-message .citation-refs ol {
+            margin: 0;
+            padding-left: 1.4em;
+            font-size: 0.85em;
+        }
+        .chat-message .citation-refs li {
+            margin: 0.15em 0;
+            color: var(--text-secondary);
+        }
+        .chat-message .prose .citation-refs a[href^="/recordings/"] {
+            display: inline;
+            background: none;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            font-size: 1em;
+            vertical-align: baseline;
+            margin: 0;
+            white-space: normal;
+            color: var(--text-accent);
+            text-decoration: none;
+        }
+        .chat-message .prose .citation-refs a[href^="/recordings/"]:hover {
+            text-decoration: underline;
+        }
+    </style>
+    <!-- Tailwind utilities, compiled at build time (scripts/build_css.sh). Last in
+         <head> so that, as with the former runtime build, they follow the page's
+         own stylesheets in the cascade. -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css', v=app_version) }}">
+    {% include 'includes/ui_theme.html' %}
+    <!-- Scripts after every stylesheet, so that no page is painted while a
+         script blocks the parser before the stylesheets are known. -->
+    <script src="{{ url_for('static', filename='vendor/js/vue.global.js', v=app_version) }}"></script>
+    <script src="{{ url_for('static', filename='vendor/js/marked.min.js', v=app_version) }}"></script>
+    <script src="{{ url_for('static', filename='vendor/js/purify.min.js', v=app_version) }}"></script>
+    <script src="{{ url_for('static', filename='js/markdown-safe.js', v=app_version) }}"></script>
+    {% include 'includes/i18n_bootstrap.html' %}
+    <script src="{{ url_for('static', filename='js/i18n.js', v=app_version) }}"></script>
+    <!-- Service worker registration, and what is removed from the browser at sign-out -->
+    <script src="{{ url_for('static', filename='js/service-worker-client.js', v=app_version) }}" data-register></script>
+    <!-- The app's own confirm, message and input dialogs (window.confirmDialog, alertDialog, promptDialog) -->
+    <script src="{{ url_for('static', filename='js/app-dialog.js', v=app_version) }}"></script>
+    {% include 'includes/loading_overlay.html' %}
+    <script src="{{ url_for('static', filename='js/timezone-sync.js', v=app_version) }}" defer></script>
+</head>
+<body class="h-full bg-[var(--bg-primary)] text-[var(--text-primary)] transition-colors duration-300">
+    {% from 'components/assistant/chat.html' import assistant_chat with context %}
+    {#- Under the Ask page's composer: the context meter (shown from 50%) and
+        the filters-active note. -#}
+    {% macro ask_footer() -%}
+    <div v-if="contextUsage >= 50 || hasActiveFilters" class="t-meta mt-2 flex items-center justify-end">
+        <span class="flex items-center gap-3">
+            <span v-if="contextUsage >= 50" class="flex items-center gap-1.5"
+                  :title="t('inquire.contextMeter', { percent: formatPercent(contextUsage) })">
+                <span class="inline-block w-16 h-1 rounded-full overflow-hidden" style="background: var(--bg-tertiary);">
+                    <span class="block h-full rounded-full"
+                          :style="{ width: contextUsage + '%', background: 'var(--bg-accent)' }"></span>
+                </span>
+                <span v-text="formatPercent(contextUsage)"></span>
+            </span>
+            <span v-if="hasActiveFilters" style="color: var(--text-accent);">
+                <i class="fas fa-filter mr-1"></i><span v-text="t('inquire.filtersActive')"></span>
+            </span>
+        </span>
+    </div>
+    {%- endmacro %}
+    <div id="inquire-app" v-cloak class="h-full flex flex-col"
+         data-current-user-name="{{ (current_user.name or current_user.username) if current_user.is_authenticated else '' }}">
+        
+        <!-- Header -->
+        <header class="bg-[var(--bg-secondary)] border-b border-[var(--border-primary)] px-3 sm:px-4 py-2 flex items-center justify-between flex-shrink-0 z-50 gap-3" style="min-height: 56px;">
+            <!-- Left side: Menu and logo -->
+            <div class="flex items-center gap-2 sm:gap-4 min-w-0 flex-shrink">
+                <!-- Mobile Sidebar Toggle — uses the design system
+                     icon-button primitive so it matches the rest of
+                     the app's icon button rhythm. -->
+                <button @click="isMobileSidebarOpen = !isMobileSidebarOpen"
+                        class="btn btn--icon lg:hidden flex-shrink-0"
+                        :aria-label="t('sidebar.filters')">
+                    <i class="fas fa-bars"></i>
+                </button>
+                
+                <!-- Logo and Title (clickable to go back) -->
+                <a href="/" class="flex items-center gap-2 sm:gap-3 min-w-0 hover:opacity-80 transition-opacity">
+                    <img src="{{ url_for('static', filename='img/icon-64.png') }}" srcset="{{ url_for('static', filename='img/icon-64.png') }} 1x, {{ url_for('static', filename='img/icon-128.png') }} 2x" alt="Speakr" class="app-logo w-6 h-6 sm:w-8 sm:h-8 flex-shrink-0">
+                    <h1 class="text-lg sm:text-xl font-bold text-[var(--text-primary)] truncate">Speakr</h1>
+                </a>
+                <!-- The page label shows from 768px: below that the Ask Ambrose and
+                     New Recording labels on the right leave it no room, and the
+                     Speakr name was squeezed out of view. -->
+                <span class="text-[var(--text-muted)] hidden md:inline" aria-hidden="true">/</span>
+                <span class="t-meta hidden md:inline" v-text="t('inquire.title', { name: assistantName })"></span>
+            </div>
+
+            <!-- Right side: the same controls as every other page
+                 (components/header-controls.html). -->
+            <div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+                {% include 'components/header-controls.html' %}
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="flex-1 flex overflow-hidden relative">
+            <!-- Mobile Sidebar Overlay -->
+            <div v-if="isMobileSidebarOpen" 
+                 @click="isMobileSidebarOpen = false"
+                 class="fixed inset-0 bg-black bg-opacity-50 z-40 lg:hidden"></div>
+            
+            {% with ui_slot = 'inquire-filters' %}{% include 'themes/slot.html' %}{% endwith %}
+            
+            <!-- Right Panel: Chat -->
+            <div class="flex-1 flex flex-col overflow-hidden"
+                 :class="isMobileSidebarOpen ? 'hidden lg:flex' : 'flex'">
+                <!-- Conversation header: label and a short filter summary
+                     on the left, Download and Clear conversation on the
+                     right, in the order of the recording chat header. -->
+                <div v-if="canDownloadInquire"
+                     class="inquire-conversation-header flex items-center gap-2 px-3 sm:px-4 py-1.5 border-b flex-shrink-0"
+                     style="border-bottom-color: var(--border-primary); background: var(--bg-secondary);">
+                    <div class="flex items-center gap-2 min-w-0 flex-1">
+                        {% with avatar_size = 'sm' %}{% include 'includes/assistant_avatar.html' %}{% endwith %}
+                        <span class="flex-shrink-0" style="font-size: var(--fs-meta); font-weight: 600; color: var(--text-primary);">${ t('inquire.conversation') }</span>
+                        <!-- Scope chip, as in the recording chat: "All
+                             recordings", or the active filters. -->
+                        <span class="assistant-scope" :title="inquireScopeLabel">
+                            <i :class="['fas', inquireFilterSummary ? 'fa-filter' : 'fa-layer-group']" aria-hidden="true"></i><span v-text="inquireScopeLabel"></span>
+                        </span>
+                    </div>
+                    <div class="flex items-center flex-shrink-0" style="gap: 2px;">
+                        <button @click="downloadInquireConversation"
+                                class="btn btn--icon btn--sm"
+                                :title="t('inquire.downloadConversation')"
+                                :aria-label="t('inquire.downloadConversation')">
+                            <i class="fas fa-download"></i>
+                        </button>
+                        <button @click="clearInquireConversation"
+                                class="btn btn--icon btn--sm"
+                                style="color: var(--text-muted);"
+                                :title="t('inquire.clearConversation')"
+                                :aria-label="t('inquire.clearConversation')">
+                            <i class="fas fa-eraser"></i>
+                        </button>
+                    </div>
+                </div>
+                <!-- Chat Messages Area -->
+                <!-- The shared AssistantChat (components/assistant/chat.html),
+                     also used by the recording panel. -->
+                {% call assistant_chat(timeline_class='flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar',
+                                       composer_class='flex-shrink-0 border-t px-4 py-3 sm:px-6 sm:py-4 inquire-composer',
+                                       answer_class='prose prose-sm max-w-none bidi-auto', bubble_class='max-w-3xl chat-message',
+                                       rows=true, placeholder='inquire.placeholder', download='downloadInquireResponse',
+                                       memory=true, footer=ask_footer) %}
+                    <!-- Welcome / Empty state -->
+                    <div class="flex flex-col items-center text-center py-12 px-4">
+                        <div class="mx-auto mb-4">
+                            {% with avatar_size = 'lg' %}{% include 'includes/assistant_avatar.html' %}{% endwith %}
+                        </div>
+                        <h2 class="text-2xl font-semibold mb-2" style="color: var(--text-primary);"
+                            v-text="t('inquire.askQuestions', { name: assistantName })"></h2>
+                        <span class="assistant-scope mb-3" :title="inquireScopeLabel">
+                            <i :class="['fas', inquireFilterSummary ? 'fa-filter' : 'fa-layer-group']" aria-hidden="true"></i><span v-text="inquireScopeLabel"></span>
+                        </span>
+                        <p class="t-body max-w-lg mb-6" style="color: var(--text-muted);" v-text="t('inquire.selectFilters')"></p>
+                        <div class="surface-raised text-left max-w-md w-full" style="padding: var(--sp-4);">
+                            <div class="t-label mb-2">
+                                <i class="fas fa-lightbulb mr-1" style="color: var(--text-accent);"></i>
+                                <span v-text="t('inquire.exampleQuestions')"></span>
+                            </div>
+                            <ul class="t-body space-y-1.5" style="color: var(--text-secondary);">
+                                <li v-for="n in 4" :key="n" class="flex items-start gap-2">
+                                    <i class="fas fa-angle-right mt-1 text-xs" style="color: var(--text-muted);"></i>
+                                    <span v-text="t('inquire.exampleQuestion' + n)"></span>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                {% endcall %}
+            </div>
+        </div>
+
+        <!-- Toast Container — shared partial so the inquire view
+             gets the same below-header positioning as the main app
+             (top: calc(--app-header-height + 16px); right: 16px). -->
+        {% include 'modals/toast-container.html' %}
+
+        <!-- Global Error Banner -->
+        <div v-if="globalError" class="fixed top-16 left-1/2 transform -translate-x-1/2 z-50 max-w-lg w-full mx-4">
+            <div class="bg-[var(--bg-danger)] text-white px-4 py-3 rounded-lg shadow-lg flex items-center justify-between">
+                <div class="flex items-center">
+                    <i class="fas fa-exclamation-circle mr-3"></i>
+                    <span class="text-sm font-medium">${ globalError }</span>
+                </div>
+                <button @click="globalError = null" class="ml-4 text-white hover:text-gray-200" :aria-label="t('buttons.close')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        </div>
+        <!-- Color Scheme Modal -->
+        <div v-if="showColorSchemeModal" class="color-scheme-modal" @click.self="closeColorSchemeModal">
+            <div class="color-scheme-modal-content">
+                <div class="color-scheme-header">
+                    <h2 class="color-scheme-title">
+                        <i class="fas fa-palette"></i>
+                        <span v-text="t('colorScheme.title')"></span>
+                    </h2>
+                    <p class="color-scheme-subtitle" v-text="t('colorScheme.subtitle')"></p>
+                </div>
+
+                <div class="color-scheme-body">
+                    {% with ui_picker_vue = true %}{% include 'includes/ui_theme_picker.html' %}{% endwith %}
+                    <div class="color-scheme-section">
+                        <h3 class="color-scheme-section-title">
+                            <i :class="isDarkMode ? 'fas fa-moon' : 'fas fa-sun'"></i>
+                            <span v-text="isDarkMode ? t('colorScheme.darkThemes') : t('colorScheme.lightThemes')"></span>
+                        </h3>
+                        <div class="color-scheme-grid">
+                            <div v-for="scheme in colorSchemes[isDarkMode ? 'dark' : 'light']"
+                                 :key="scheme.id"
+                                 @click="selectColorScheme(scheme.id)"
+                                 :class="['color-scheme-option', currentColorScheme === scheme.id ? 'active' : '']">
+                                <div class="color-scheme-preview">
+                                    <div :class="`preview-${isDarkMode ? 'dark-' : ''}${scheme.id}-primary color-scheme-preview-segment`"></div>
+                                    <div :class="`preview-${isDarkMode ? 'dark-' : ''}${scheme.id}-secondary color-scheme-preview-segment`"></div>
+                                    <div :class="`preview-${isDarkMode ? 'dark-' : ''}${scheme.id}-tertiary color-scheme-preview-segment`"></div>
+                                </div>
+                                <div class="color-scheme-name" v-text="t('colorScheme.themes.' + (isDarkMode ? 'dark' : 'light') + '.' + scheme.id + '.name')"></div>
+                                <div class="color-scheme-description" v-text="t('colorScheme.themes.' + (isDarkMode ? 'dark' : 'light') + '.' + scheme.id + '.description')"></div>
+                                <div v-if="currentColorScheme === scheme.id" class="color-scheme-check">
+                                    <i class="fas fa-check"></i>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="color-scheme-footer">
+                    <button @click="resetColorScheme" class="color-scheme-reset-btn">
+                        <i class="fas fa-undo mr-2"></i><span v-text="t('colorScheme.resetToDefault')"></span>
+                    </button>
+                    <button @click="closeColorSchemeModal" class="color-scheme-close-btn" v-text="t('common.close')">
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- CSRF Token Management -->
+    <script src="{{ url_for('static', filename='js/csrf-refresh.js', v=app_version) }}"></script>
+    
+    <!-- Shared Components -->
+    <script src="{{ url_for('static', filename='js/shared-components.js', v=app_version) }}"></script>
+    
+    <!-- Inquire Mode Vue App -->
+    <script>
+        const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
+
+        // Initialize i18n
+        let t = (key) => key; // Default fallback
+        const assistantName = window.speakrAssistantName || 'Ambrose';
+        
+        async function initializeI18n() {
+            const userLanguage = "{{ user_language }}";
+            
+            // Initialize the global i18n instance
+            if (window.i18n) {
+                await window.i18n.init(userLanguage);
+                
+                // Create a shorthand translation function
+                t = (key, params) => window.i18n.t(key, params);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            await initializeI18n();
+            // Notifications for the shared header's user menu.
+            const { useNotifications } = await import('/static/js/modules/composables/notifications.js');
+            const { showToast } = await import('/static/js/modules/utils/toast.js');
+            const { responseWithQuestion } = await import('/static/js/modules/utils/chat-turn.js');
+            const { folderMarkColor } = await import('/static/js/modules/utils/colors.js');
+            // The shared Ambrose chat and its library filters (Ambrose 2b)
+            const { useAssistantChat } = await import('/static/js/modules/assistant/chat.js');
+            const { useSearchIn } = await import('/static/js/modules/assistant/search-in.js');
+            // Keyboard shortcuts: the keys of every page, and / for the question field
+            const { installPageShortcuts } = await import('/static/js/modules/utils/shortcut-help.js');
+            
+            const csrfToken = ref(document.querySelector('meta[name="csrf-token"]')?.getAttribute('content'));
+            const i18nInstance = window.i18n;
+
+            createApp({
+                setup() {
+                    // --- State ---
+                    // The library filters of the filter column (a theme slot),
+                    // in modules/assistant/search-in.js. The names below are the
+                    // ones the theme slots read.
+                    const searchIn = useSearchIn({ t: (key, params) => i18nInstance ? i18nInstance.t(key, params) : key });
+                    const inquireFilters = searchIn.filters;
+                    const tagSearchQuery = Vue.toRef(searchIn, 'tagQuery');
+                    const folderSearchQuery = Vue.toRef(searchIn, 'folderQuery');
+                    const speakerSearchQuery = Vue.toRef(searchIn, 'speakerQuery');
+                    
+                    // Use shared components
+                    const { isDarkMode, toggleDarkMode, initializeDarkMode } = window.SharedComponents.useDarkMode();
+                    const { 
+                        showColorSchemeModal, 
+                        currentColorScheme, 
+                        colorSchemes,
+                        openColorSchemeModal, 
+                        closeColorSchemeModal, 
+                        selectColorScheme,
+                        resetColorScheme,
+                        applyColorScheme,
+                        initializeColorScheme
+                    } = window.SharedComponents.useColorScheme();
+                    // UI theme (includes/ui_theme.html): the filter column is a
+                    // theme slot (themes/slot.html) and switches on this value.
+                    const uiTheme = ref(document.documentElement.getAttribute('data-ui-theme') || 'default');
+                    window.addEventListener('speakr:ui-theme', (e) => { uiTheme.value = (e.detail && e.detail.id) || 'default'; });
+                    const setUiTheme = (id) => (window.speakrApplyUiTheme ? window.speakrApplyUiTheme(id) : uiTheme.value);
+                    const {
+                        showSharesListModal,
+                        userShares,
+                        isLoadingShares,
+                        openSharesList,
+                        closeSharesList,
+                        copyShareLink,
+                        deleteShare
+                    } = window.SharedComponents.useSharesModal();
+                    const { isUserMenuOpen, toggleUserMenu, closeUserMenu } = window.SharedComponents.useUserMenu();
+                    const isMobileSidebarOpen = ref(false);
+                    
+                    const availableFilters = searchIn.available;
+
+                    const inquireChatMessages = ref([]);
+                    const inquireChatInput = ref('');
+                    const isInquireChatLoading = ref(false);
+                    // Context accounting: 0-100 estimate from the server, and
+                    // the compaction state. `memory` is the server-produced
+                    // summary of folded turns; `fromIndex` is where verbatim
+                    // history starts in inquireChatMessages; `dividerIndex`
+                    // marks where the "summarized" divider renders.
+                    const contextUsage = ref(0);
+                    const memoryState = reactive({ memory: '', fromIndex: 0, dividerIndex: -1, showMemory: false });
+                    const globalError = ref(null);
+                    const tokenBudget = ref({
+                        has_budget: false,
+                        budget: null,
+                        usage: 0,
+                        percentage: 0
+                    });
+
+                    // --- Computed ---
+                    const hasActiveFilters = computed(() => searchIn.active);
+
+                    const hasTurnContent = (message) => typeof message.content === 'string' && message.content !== '';
+
+                    const canDownloadInquire = computed(() => inquireChatMessages.value.some(hasTurnContent));
+
+                    // An answer streams while the request runs and it is the
+                    // last message; its Copy and Download appear after that.
+                    // Short readout of the active filters for the conversation
+                    // header ("2 tags · Date Range"), and the scope chip: that, or
+                    // "All recordings".
+                    const inquireFilterSummary = computed(() => searchIn.summary);
+                    const inquireScopeLabel = computed(() => searchIn.label);
+                    const filteredTags = computed(() => searchIn.filteredTags);
+                    const filteredFolders = computed(() => searchIn.filteredFolders);
+                    const filteredSpeakers = computed(() => searchIn.filteredSpeakers);
+
+                    // --- Functions ---
+                    const setGlobalError = (message, duration = 7000) => {
+                        globalError.value = message;
+                        if (duration > 0) {
+                            setTimeout(() => { if (globalError.value === message) globalError.value = null; }, duration);
+                        }
+                    };
+
+                    const loadTokenBudget = async () => {
+                        try {
+                            const response = await fetch('/api/user/token-budget');
+                            if (response.ok) {
+                                tokenBudget.value = await response.json();
+                            }
+                        } catch (error) {
+                            console.error('Error loading token budget:', error);
+                        }
+                    };
+
+                    const loadAvailableFilters = () => searchIn.load();
+
+                    // The chat: the shared AssistantChat (modules/assistant/chat.js).
+                    // The question goes to /api/inquire/chat with the filters, the
+                    // verbatim history and the agent's memory of older turns.
+                    let sentFromIndex = 0;
+                    const assistant = useAssistantChat({
+                        messages: inquireChatMessages, input: inquireChatInput, loading: isInquireChatLoading,
+                        t: (key, params) => i18nInstance ? i18nInstance.t(key, params) : key,
+                        toast: showToast,
+                        historyFrom: () => memoryState.fromIndex,
+                        request: ({ message, history, signal }) => {
+                            sentFromIndex = memoryState.fromIndex;
+                            return fetch('/api/inquire/chat', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken.value },
+                                signal,
+                                body: JSON.stringify(Object.assign({
+                                    message,
+                                    message_history: history,
+                                    conversation_memory: memoryState.memory || undefined,
+                                    context_chunks: 8
+                                }, searchIn.fields()))
+                            });
+                        },
+                        // The agent's context events; the rest is the shared stream.
+                        onEvent: (data) => {
+                            if (data.context_usage !== undefined) {
+                                contextUsage.value = data.context_usage;
+                                return true;
+                            }
+                            if (data.context_compacted) {
+                                // Older turns were folded into a memory block; verbatim
+                                // history now starts keep_last messages from the end of
+                                // what was sent.
+                                const kept = data.context_compacted.keep_last || 0;
+                                memoryState.memory = data.context_compacted.memory || '';
+                                const newFrom = Math.max(sentFromIndex, inquireChatMessages.value.length - 1 - kept);
+                                memoryState.fromIndex = newFrom;
+                                memoryState.dividerIndex = newFrom;
+                                return true;
+                            }
+                            if (data.conversation_memory) {
+                                memoryState.memory = data.conversation_memory;
+                                return true;
+                            }
+                            return false;
+                        },
+                        onDone: () => loadTokenBudget(),
+                    });
+
+                    // Keyboard shortcuts (docs/user-guide/keyboard-shortcuts.md)
+                    const { openHelp: openShortcutsHelp } = installPageShortcuts({
+                        t: (key, params) => i18nInstance ? i18nInstance.t(key, params) : key,
+                        extra: [{ keys: ['/'], scope: 'global', group: 'assistant', label: 'shortcuts.focusQuestion',
+                            params: { name: assistantName }, run: () => assistant.focusInput() }],
+                    });
+
+                    // An answer streams while the request runs and it is the
+                    // last message; its Copy and Download appear after that.
+                    const showAnswerActions = (message, index) => assistant.showActions(message, index);
+                    const stopInquireChat = () => assistant.stop();
+                    const copyInquireAnswer = (message, event) => assistant.copy(message, event);
+
+                    // Filter names for the downloaded file; ids no longer in availableFilters are skipped
+                    const inquireDownloadFilters = () => {
+                        const namesFor = (ids, options) => ids
+                            .map(id => options.find(option => option.id === id))
+                            .filter(Boolean)
+                            .map(option => option.name);
+                        const groups = {
+                            tags: namesFor(inquireFilters.selectedTags, availableFilters.tags),
+                            folders: namesFor(inquireFilters.selectedFolders, availableFilters.folders),
+                            speakers: [...inquireFilters.selectedSpeakers],
+                            dates: [inquireFilters.dateFrom, inquireFilters.dateTo].filter(Boolean)
+                        };
+                        const filters = {};
+                        for (const [key, names] of Object.entries(groups)) {
+                            if (names.length > 0) filters[key] = names;
+                        }
+                        return Object.keys(filters).length > 0 ? filters : undefined;
+                    };
+
+                    // The Sources list under an answer, as {title, url}
+                    // pairs in the numbered order the page shows.
+                    // Numbers continue through the chat, so each source carries its own.
+                    const downloadSources = (message) => (message.role === 'assistant' && Array.isArray(message.sources))
+                        ? message.sources.filter(s => s.kind === 'library')
+                            .map(s => ({ n: s.n, title: s.title || ('#' + s.recording_id), url: '/recordings/' + s.recording_id }))
+                        : undefined;
+
+                    const downloadTurn = (m) => ({ role: m.role, content: m.content, sources: downloadSources(m) });
+
+                    const downloadInquireConversation = () => postInquireDownload(
+                        inquireChatMessages.value.filter(hasTurnContent).map(downloadTurn));
+
+                    // One answer and the question before it, as inquire-response.docx.
+                    const downloadInquireResponse = (index) => postInquireDownload(
+                        responseWithQuestion(inquireChatMessages.value, index).map(downloadTurn), 'response');
+
+                    // scope 'response' marks a one-answer download; it only changes the filename.
+                    const postInquireDownload = async (messages, scope) => {
+                        if (messages.length === 0) return;
+
+                        const tFailed = t('chat.downloadFailed');
+                        const failedMessage = tFailed !== 'chat.downloadFailed' ? tFailed : 'Couldn\'t download the chat';
+                        try {
+                            const response = await fetch('/api/inquire/download', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-CSRFToken': csrfToken.value
+                                },
+                                body: JSON.stringify({ messages, filters: inquireDownloadFilters(), scope })
+                            });
+
+                            if (!response.ok) {
+                                const error = await response.json().catch(() => ({}));
+                                setGlobalError(error.error || failedMessage);
+                                return;
+                            }
+
+                            const blob = await response.blob();
+                            const url = window.URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.style.display = 'none';
+                            a.href = url;
+                            a.download = scope === 'response' ? 'inquire-response.docx' : 'inquire.docx';
+                            document.body.appendChild(a);
+                            a.click();
+                            window.URL.revokeObjectURL(url);
+                            document.body.removeChild(a);
+                        } catch (error) {
+                            console.error('Inquire download failed:', error);
+                            setGlobalError(failedMessage);
+                        }
+                    };
+
+                    // Empty the conversation and the agent's memory; the
+                    // filters stay. An answer still streaming is stopped
+                    // first, so it cannot add to the emptied conversation.
+                    const clearInquireConversation = () => {
+                        stopInquireChat();
+                        inquireChatMessages.value = [];
+                        // New conversation: drop the agent's memory/compaction state.
+                        memoryState.memory = '';
+                        memoryState.fromIndex = 0;
+                        memoryState.dividerIndex = -1;
+                        memoryState.showMemory = false;
+                        contextUsage.value = 0;
+                    };
+
+                    const clearInquireFilters = () => {
+                        inquireFilters.selectedTags = [];
+                        inquireFilters.selectedFolders = [];
+                        inquireFilters.selectedSpeakers = [];
+                        inquireFilters.selectedRecordings = [];
+                        inquireFilters.dateFrom = null;
+                        inquireFilters.dateTo = null;
+                        clearInquireConversation();
+                    };
+                    
+                    const formatDate = (dateString) => {
+                        if (!dateString) return '';
+                        // meeting_date is naive UTC — parse via the instant
+                        // convention so the date renders in the viewer's timezone
+                        let s = dateString;
+                        if (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s) && !/(?:Z|[+-]\d{2}:?\d{2})$/.test(s)) {
+                            s = s.replace(' ', 'T') + 'Z';
+                        }
+                        const date = new Date(s);
+                        return date.toLocaleDateString(window.i18n?.getIntlLocale?.());
+                    };
+
+                    // For INSTANT timestamps (e.g. share created_at): backend sends
+                    // naive UTC, so append 'Z' to read it as UTC and render local.
+                    const formatInstant = (dateString) => {
+                        if (!dateString) return '';
+                        let s = dateString;
+                        if (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s) && !/(?:Z|[+-]\d{2}:?\d{2})$/.test(s)) {
+                            s = s.replace(' ', 'T') + 'Z';
+                        }
+                        const date = new Date(s);
+                        return date.toLocaleDateString(window.i18n?.getIntlLocale?.()) + ' ' + date.toLocaleTimeString(window.i18n?.getIntlLocale?.(), { hour: '2-digit', minute: '2-digit' });
+                    };
+
+                    // --- Theme Management (from main app.js) ---
+                    const applyThemeFromStorage = () => {
+                        const savedDarkMode = localStorage.getItem('darkMode');
+                        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                        const isDark = savedDarkMode !== null ? savedDarkMode === 'true' : prefersDark;
+
+                        document.documentElement.classList.toggle('dark', isDark);
+
+                        const savedScheme = localStorage.getItem('colorScheme') || (window.speakrThemeDefaults || {}).colorScheme || 'blue';
+                        const currentMode = isDark ? 'dark' : 'light';
+                        const themeClass = savedScheme === 'blue' ? '' : `theme-${currentMode}-${savedScheme}`;
+
+                        // Remove all existing theme classes
+                        document.documentElement.className = document.documentElement.className
+                            .replace(/theme-(?:light|dark)-\w+/g, '');
+
+                        if (themeClass) {
+                            document.documentElement.classList.add(themeClass);
+                        }
+                    };
+
+                    /**
+                     * Set up global click handler to close dropdowns when clicking outside
+                     * Provides elegant UX by closing menus when users click elsewhere
+                     */
+                    const setupGlobalClickHandler = () => {
+                        document.addEventListener('click', (event) => {
+                            const target = event.target;
+
+                            // Close user menu if clicking outside of it
+                            if (isUserMenuOpen.value) {
+                                const userMenuButton = target.closest('[data-user-menu-toggle]');
+                                const userMenuDropdown = target.closest('[data-user-menu-dropdown]');
+
+                                if (!userMenuButton && !userMenuDropdown) {
+                                    isUserMenuOpen.value = false;
+                                }
+                            }
+                        });
+                    };
+
+                    // --- Lifecycle ---
+                    onMounted(async () => {
+                        // Initialize dark mode and color scheme
+                        initializeDarkMode();
+                        initializeColorScheme(isDarkMode.value);
+                        setupGlobalClickHandler();
+                        
+                        // Watch dark mode changes to update color scheme
+                        Vue.watch(isDarkMode, (newValue) => {
+                            initializeColorScheme(newValue);
+                        });
+                        
+                        // Apply theme from localStorage on page load
+                        applyThemeFromStorage();
+                        
+                        loadAvailableFilters();
+                        loadTokenBudget();
+                    });
+
+                    const headerNotifications = useNotifications({}, {
+                        t: (key, params) => i18nInstance ? i18nInstance.t(key, params) : key,
+                    });
+                    onMounted(() => headerNotifications.startNotificationPolling());
+
+                    return {
+                        // i18n - bind to i18n instance to maintain context
+                        t: (key, params) => i18nInstance ? i18nInstance.t(key, params) : key,
+                        // The assistant's name for the name placeholder of its strings (includes/i18n_bootstrap.html)
+                        assistantName,
+                        // components/header-controls.html formats numbers with this (#480)
+                        uiLocale: () => window.i18n?.getIntlLocale?.(),
+                        formatPercent: (pct, options) => (window.i18n?.formatPercent ? window.i18n.formatPercent(pct, options) : `${Math.round((Number(pct) || 0) * 10) / 10}%`),
+
+                        // Shared header controls (components/header-controls.html)
+                        ...headerNotifications,
+                        switchToUploadView: () => { window.location.href = '/?upload=1'; },
+                        showInstallButton: false,
+                        isPWAInstalled: true,
+                        promptInstall: () => {},
+                        
+                        // State
+                        inquireFilters,
+                        availableFilters,
+                        inquireChatMessages,
+                        inquireChatInput,
+                        isInquireChatLoading,
+                        contextUsage,
+                        memoryState,
+                        stopInquireChat,
+                        globalError,
+                        tokenBudget,
+                        isUserMenuOpen,
+                        isMobileSidebarOpen,
+                        tagSearchQuery,
+                        folderSearchQuery,
+                        speakerSearchQuery,
+                        
+                        // Dark Mode
+                        isDarkMode,
+                        toggleDarkMode,
+                        
+                        // UI theme
+                        uiTheme,
+                        setUiTheme,
+
+                        // Color Scheme
+                        showColorSchemeModal,
+                        currentColorScheme,
+                        colorSchemes,
+                        openColorSchemeModal,
+                        closeColorSchemeModal,
+                        selectColorScheme,
+                        resetColorScheme,
+                        
+                        // Shares Modal
+                        showSharesListModal,
+                        userShares,
+                        isLoadingShares,
+                        openSharesList,
+                        closeSharesList,
+                        copyShareLink,
+                        deleteShare,
+                        
+                        // Computed
+                        hasActiveFilters,
+                        canDownloadInquire,
+                        inquireFilterSummary,
+                        inquireScopeLabel,
+                        clearInquireConversation,
+                        filteredTags,
+                        filteredFolders,
+                        folderMarkColor,
+                        filteredSpeakers,
+                        
+                        // Functions
+                        clearInquireFilters,
+                        downloadInquireConversation,
+                        downloadInquireResponse,
+                        showAnswerActions,
+                        copyInquireAnswer,
+                        loadAvailableFilters,
+                        setGlobalError,
+                        formatDate,
+                        formatInstant,
+
+                        // The shared chat (components/assistant/chat.html)
+                        assistant,
+                        openShortcutsHelp,
+                    };
+                },
+                delimiters: ['${', '}']
+            }).mount('#inquire-app');
+
+            // Hide loading overlay after app mounts
+            Vue.nextTick(() => {
+                if (window.AppLoader) {
+                    AppLoader.waitForReady();
+                }
+            });
+        });
+    </script>
+</body>
+</html>

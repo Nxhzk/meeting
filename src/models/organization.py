@@ -1,0 +1,314 @@
+"""
+Organization models for groups, tags, and related structures.
+
+This module defines models for organizing users into groups and tagging recordings.
+"""
+
+from datetime import datetime
+
+from sqlalchemy import event, select
+
+from src.database import db
+
+
+class Group(db.Model):
+    """Groups for organizing users and sharing recordings."""
+
+    __tablename__ = 'group'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False, unique=True)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # The user who created the group (#576). NULL for groups created before
+    # this column existed and after the creator's account is deleted.
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='SET NULL'), nullable=True, index=True)
+
+    # Relationships
+    memberships = db.relationship('GroupMembership', back_populates='group', cascade='all, delete-orphan')
+
+    def to_dict(self):
+        """Convert model to dictionary representation."""
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'member_count': len(self.memberships),
+            'created_by': self.created_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class GroupMembership(db.Model):
+    """Tracks user membership in groups with roles."""
+
+    __tablename__ = 'group_membership'
+
+    id = db.Column(db.Integer, primary_key=True)
+    group_id = db.Column(db.Integer, db.ForeignKey('group.id', ondelete='CASCADE'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    role = db.Column(db.String(20), default='member')  # 'admin' or 'member'
+    joined_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Relationships
+    group = db.relationship('Group', back_populates='memberships')
+    user = db.relationship('User', backref=db.backref('group_memberships', lazy=True, cascade='all, delete-orphan'))
+
+    # Unique constraint: user can only be in a group once
+    __table_args__ = (db.UniqueConstraint('group_id', 'user_id', name='unique_group_membership'),)
+
+    def to_dict(self):
+        """Convert model to dictionary representation."""
+        return {
+            'id': self.id,
+            'group_id': self.group_id,
+            'group_name': self.group.name if self.group else None,
+            'user_id': self.user_id,
+            'username': self.user.username if self.user else None,
+            'role': self.role,
+            'joined_at': self.joined_at.isoformat() if self.joined_at else None
+        }
+
+
+class RecordingTag(db.Model):
+    """Many-to-many relationship table for recordings and tags."""
+
+    __tablename__ = 'recording_tags'
+
+    recording_id = db.Column(db.Integer, db.ForeignKey('recording.id'), primary_key=True)
+    tag_id = db.Column(db.Integer, db.ForeignKey('tag.id'), primary_key=True)
+    added_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=True)
+    order = db.Column(db.Integer, nullable=False, default=0)
+
+    # The primary key starts with recording_id; tag counts read by tag (D#483)
+    __table_args__ = (db.Index('ix_recording_tags_tag_id', 'tag_id'),)
+
+    # Relationships
+    recording = db.relationship('Recording', back_populates='tag_associations')
+    tag = db.relationship('Tag', back_populates='recording_associations')
+
+
+class Folder(db.Model):
+    """Folders for organizing recordings (one-to-many relationship)."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    group_id = db.Column(db.Integer, db.ForeignKey('group.id', ondelete='CASCADE'), nullable=True)  # Group-scoped folder
+    # Parent folder (#585). NULL is a top-level folder. A parent is always in
+    # the same scope: the same user's personal folders, or the same group.
+    parent_id = db.Column(db.Integer, db.ForeignKey('folder.id', ondelete='SET NULL'), nullable=True, index=True)
+    color = db.Column(db.String(7), default='#10B981')  # Hex color for UI (green to differentiate from tags)
+
+    # Custom settings for this folder
+    custom_prompt = db.Column(db.Text, nullable=True)  # Custom summarization prompt
+    title_prompt = db.Column(db.Text, nullable=True)  # Instructions for AI titles (#400)
+    default_language = db.Column(db.String(10), nullable=True)  # Default transcription language
+    default_min_speakers = db.Column(db.Integer, nullable=True)  # Default min speakers for ASR
+    default_max_speakers = db.Column(db.Integer, nullable=True)  # Default max speakers for ASR
+
+    # Transcription hints
+    default_hotwords = db.Column(db.Text, nullable=True)  # Comma-separated words to bias recognition
+    default_initial_prompt = db.Column(db.Text, nullable=True)  # Initial prompt to steer transcription
+    default_transcription_model = db.Column(db.String(120), nullable=True)  # Override TRANSCRIPTION_MODEL when set
+
+    # Retention and deletion settings
+    protect_from_deletion = db.Column(db.Boolean, default=False)  # Exempt recordings in folder from auto-deletion
+    retention_days = db.Column(db.Integer, nullable=True)  # Folder-specific retention override
+
+    # Group folder settings
+    auto_share_on_apply = db.Column(db.Boolean, default=True)  # Auto-share recording with group when moved to folder
+    share_with_group_lead = db.Column(db.Boolean, default=True)  # Share with group admins when moved to folder
+
+    # Naming template for recordings in this folder
+    naming_template_id = db.Column(db.Integer, db.ForeignKey('naming_template.id', ondelete='SET NULL'), nullable=True)
+
+    # Export template for recordings in this folder
+    export_template_id = db.Column(db.Integer, db.ForeignKey('export_template.id', ondelete='SET NULL'), nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref=db.backref('folders', lazy=True, cascade='all, delete-orphan'))
+    group = db.relationship('Group', backref=db.backref('folders', lazy=True))
+    naming_template = db.relationship('NamingTemplate', foreign_keys=[naming_template_id])
+    export_template = db.relationship('ExportTemplate', foreign_keys=[export_template_id])
+    # One-to-many relationship with recordings
+    recordings = db.relationship('Recording', back_populates='folder', lazy=True)
+
+    # Unique constraint: folder name must be unique per user. A group folder
+    # name is also unique within its group, whoever created it (#513); the
+    # startup migration 0006 adds that index to existing databases.
+    __table_args__ = (
+        db.UniqueConstraint('name', 'user_id', name='_user_folder_uc'),
+        db.Index(
+            'uq_folder_group_name', 'name', 'group_id', unique=True,
+            sqlite_where=db.text('group_id IS NOT NULL'),
+            postgresql_where=db.text('group_id IS NOT NULL'),
+        ),
+    )
+
+    @property
+    def is_group_folder(self):
+        """Check if this is a group-scoped folder."""
+        return self.group_id is not None
+
+    def to_dict(self, recording_count=None, total_recording_count=None):
+        """Convert model to dictionary representation.
+
+        recording_count: the folder's recording count when the caller has
+        counted it already (list pages count all their folders at once).
+        total_recording_count: recordings in this folder and all its
+        descendants (#585). It is part of the dict only when the caller
+        passes it; the folder endpoints do, the folder embedded in a
+        recording does not.
+        """
+        if recording_count is None:
+            recording_count = len(self.recordings) if self.recordings else 0
+        result = {
+            'id': self.id,
+            'name': self.name,
+            'color': self.color,
+            'group_id': self.group_id,
+            'parent_id': self.parent_id,
+            'is_group_folder': self.is_group_folder,
+            'group_name': self.group.name if self.group else None,
+            'custom_prompt': self.custom_prompt,
+            'title_prompt': self.title_prompt,
+            'default_language': self.default_language,
+            'default_min_speakers': self.default_min_speakers,
+            'default_max_speakers': self.default_max_speakers,
+            'default_hotwords': self.default_hotwords,
+            'default_initial_prompt': self.default_initial_prompt,
+            'default_transcription_model': self.default_transcription_model,
+            'protect_from_deletion': self.protect_from_deletion,
+            'retention_days': self.retention_days,
+            'auto_share_on_apply': self.auto_share_on_apply,
+            'share_with_group_lead': self.share_with_group_lead,
+            'naming_template_id': self.naming_template_id,
+            'naming_template_name': self.naming_template.name if self.naming_template else None,
+            'export_template_id': self.export_template_id,
+            'export_template_name': self.export_template.name if self.export_template else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'recording_count': recording_count
+        }
+        if total_recording_count is not None:
+            result['total_recording_count'] = total_recording_count
+        return result
+
+
+@event.listens_for(Folder, 'before_delete')
+def _promote_child_folders(mapper, connection, target):
+    """Move a deleted folder's children up to its own parent (#585).
+
+    This runs for every ORM delete of a folder, including the cascade when
+    a user is removed. It does not rely on the parent_id foreign key, which
+    SQLite does not enforce here. The parent is read from the row, not from
+    the object, so a chain of folders deleted in one flush stays consistent.
+    """
+    table = Folder.__table__
+    # An alias, so the subquery is not correlated with the updated rows.
+    deleted = table.alias('deleted_folder')
+    own_parent = (select(deleted.c.parent_id).where(deleted.c.id == target.id)
+                  .scalar_subquery())
+    connection.execute(table.update().where(table.c.parent_id == target.id)
+                       .values(parent_id=own_parent))
+
+
+class Tag(db.Model):
+    """Tags for organizing and categorizing recordings."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    group_id = db.Column(db.Integer, db.ForeignKey('group.id', ondelete='CASCADE'), nullable=True)  # Group-scoped tag
+    color = db.Column(db.String(7), default='#3B82F6')  # Hex color for UI
+
+    # Custom settings for this tag
+    custom_prompt = db.Column(db.Text, nullable=True)  # Custom summarization prompt
+    title_prompt = db.Column(db.Text, nullable=True)  # Instructions for AI titles (#400)
+    default_language = db.Column(db.String(10), nullable=True)  # Default transcription language
+    default_min_speakers = db.Column(db.Integer, nullable=True)  # Default min speakers for ASR
+    default_max_speakers = db.Column(db.Integer, nullable=True)  # Default max speakers for ASR
+
+    # Transcription hints
+    default_hotwords = db.Column(db.Text, nullable=True)  # Comma-separated words to bias recognition
+    default_initial_prompt = db.Column(db.Text, nullable=True)  # Initial prompt to steer transcription
+    default_transcription_model = db.Column(db.String(120), nullable=True)  # Override TRANSCRIPTION_MODEL when set
+
+    # Retention and deletion settings
+    protect_from_deletion = db.Column(db.Boolean, default=False)  # Exempt tagged recordings from auto-deletion
+    retention_days = db.Column(db.Integer, nullable=True)  # Group-specific retention override (overrides global)
+
+    # Group tag settings
+    auto_share_on_apply = db.Column(db.Boolean, default=True)  # Auto-share recording with group when this tag is applied
+    share_with_group_lead = db.Column(db.Boolean, default=True)  # Share with group admins when this tag is applied
+
+    # Naming template for recordings with this tag
+    naming_template_id = db.Column(db.Integer, db.ForeignKey('naming_template.id', ondelete='SET NULL'), nullable=True)
+
+    # Export template for recordings with this tag
+    export_template_id = db.Column(db.Integer, db.ForeignKey('export_template.id', ondelete='SET NULL'), nullable=True)
+
+    # Auto-process watch folder settings
+    is_auto_process = db.Column(db.Boolean, default=False)
+    auto_process_folder_name = db.Column(db.String(100), nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref=db.backref('tags', lazy=True, cascade='all, delete-orphan'))
+    group = db.relationship('Group', backref=db.backref('tags', lazy=True))
+    naming_template = db.relationship('NamingTemplate', foreign_keys=[naming_template_id])
+    export_template = db.relationship('ExportTemplate', foreign_keys=[export_template_id])
+    # Use association object for many-to-many with order tracking
+    recording_associations = db.relationship('RecordingTag', back_populates='tag', cascade='all, delete-orphan')
+
+    # Unique constraint: tag name must be unique per user (or per group if group_id is set)
+    __table_args__ = (db.UniqueConstraint('name', 'user_id', name='_user_tag_uc'),)
+
+    @property
+    def is_group_tag(self):
+        """Check if this is a group-scoped tag."""
+        return self.group_id is not None
+
+    def to_dict(self, recording_count=None):
+        """Convert model to dictionary representation.
+
+        recording_count: the tag's recording count when the caller has
+        counted it already (list pages count all their tags at once).
+        """
+        if recording_count is None:
+            recording_count = len(self.recording_associations)
+        return {
+            'id': self.id,
+            'name': self.name,
+            'color': self.color,
+            'group_id': self.group_id,
+            'is_group_tag': self.is_group_tag,
+            'group_name': self.group.name if self.group else None,
+            'custom_prompt': self.custom_prompt,
+            'title_prompt': self.title_prompt,
+            'default_language': self.default_language,
+            'default_min_speakers': self.default_min_speakers,
+            'default_max_speakers': self.default_max_speakers,
+            'default_hotwords': self.default_hotwords,
+            'default_initial_prompt': self.default_initial_prompt,
+            'default_transcription_model': self.default_transcription_model,
+            'protect_from_deletion': self.protect_from_deletion,
+            'retention_days': self.retention_days,
+            'auto_share_on_apply': self.auto_share_on_apply,
+            'share_with_group_lead': self.share_with_group_lead,
+            'naming_template_id': self.naming_template_id,
+            'naming_template_name': self.naming_template.name if self.naming_template else None,
+            'export_template_id': self.export_template_id,
+            'export_template_name': self.export_template.name if self.export_template else None,
+            'is_auto_process': self.is_auto_process or False,
+            'auto_process_folder_name': self.auto_process_folder_name,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'recording_count': recording_count
+        }
