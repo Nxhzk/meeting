@@ -567,9 +567,6 @@ def convert_upload_in_request(filepath, *, original_filename, codec_info,
     cannot decode the file, the staging copy is removed and error_response
     holds the answer (500, 500 or 400) for the caller to return.
     """
-    # Read from src.api.recordings at call time: its routes use it too.
-    from src.api.recordings import USE_ASR_ENDPOINT
-
     # Use shared conversion utility - handles ALL conversion needs (codec conversion + compression)
     try:
         result = convert_if_needed(
@@ -577,7 +574,6 @@ def convert_upload_in_request(filepath, *, original_filename, codec_info,
             original_filename=original_filename,
             codec_info=codec_info,
             needs_chunking=needs_chunking_for_processing,
-            is_asr_endpoint=USE_ASR_ENDPOINT,
             delete_original=True,
             connector_specs=connector_specs  # Pass connector specs for codec restrictions
         )
@@ -954,11 +950,10 @@ def ingest(
     with the 500 unexpected_error_upload answer, each after removing the
     staging copy in ``filepath``.
     """
-    # Read from src.api.recordings at call time: its routes use USE_ASR_ENDPOINT
-    # and get_storage_service too, init sets chunking_service, and the join
-    # path lives there.
+    # Read from src.api.recordings at call time: its routes use get_storage_service
+    # too, init sets chunking_service, and the join path lives there.
     from src.api.recordings import (
-        USE_ASR_ENDPOINT, _ingest_join_part, chunking_service, get_storage_service,
+        _ingest_join_part, chunking_service, get_storage_service,
     )
 
     filepath = None
@@ -1093,7 +1088,7 @@ def ingest(
         # Check if chunking will be needed for this file (uses connector-aware logic)
         needs_chunking_for_processing = bool(
             chunking_service and
-            chunking_service.needs_chunking(filepath, USE_ASR_ENDPOINT, connector_specs)
+            chunking_service.needs_chunking(filepath, connector_specs=connector_specs)
         )
 
         upload_probe = probe_upload(filepath=filepath, original_filename=original_filename)

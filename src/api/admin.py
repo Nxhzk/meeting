@@ -8,7 +8,7 @@ import os
 import json
 import time
 from datetime import datetime, timedelta
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, send_file, Response, current_app
+from flask import Blueprint, request, redirect, url_for, flash, jsonify, send_file, Response, current_app
 from flask_login import login_required, current_user, login_user
 from werkzeug.utils import secure_filename
 
@@ -56,62 +56,14 @@ def init_admin_helpers(**kwargs):
 @admin_bp.route('/admin', methods=['GET'])
 @login_required
 def admin():
-    # Check if user is admin OR group admin
-    is_team_admin = GroupMembership.query.filter_by(
-        user_id=current_user.id,
-        role='admin'
-    ).first() is not None
-
-    from src.api.groups import can_create_groups
-    may_create_groups = not current_user.is_admin and can_create_groups(current_user)
-    if not current_user.is_admin and not is_team_admin and not may_create_groups:
-        flash(translate('server.flash.adminAccessDenied'), 'danger')
-        return redirect(url_for('recordings.index'))
-
-    # Redirect group admins, and users who may create groups, to their
-    # dedicated management page
-    if not current_user.is_admin:
-        return redirect(url_for('admin.group_management'))
-
-    # Full admins only get here
-    user_language = current_user.ui_language if current_user.is_authenticated and current_user.ui_language else 'en'
-    return render_template('admin.html',
-                         title='Admin Dashboard',
-                         admin_title=translate('nav.adminDashboard', user_language),
-                         groups_title=translate('nav.groupManagement', user_language),
-                         inquire_mode_enabled=ENABLE_INQUIRE_MODE,
-                         global_retention_days=_self.GLOBAL_RETENTION_DAYS,
-                         is_group_admin_only=False,
-                         user_language=user_language)
+    # No full workspace UI. The protected /admin/* APIs still manage data.
+    return redirect(url_for('recordings.index'))
 
 
 @admin_bp.route('/group-management', methods=['GET'])
 @login_required
 def group_management():
-    """Dedicated group management page for group admins (non-full admins)
-    and for users who may create groups (#576)."""
-    # Check if user is a group admin
-    is_team_admin = GroupMembership.query.filter_by(
-        user_id=current_user.id,
-        role='admin'
-    ).first() is not None
-
-    from src.api.groups import can_create_groups
-    if not is_team_admin and not current_user.is_admin and not can_create_groups(current_user):
-        flash(translate('server.flash.groupAccessDenied'), 'danger')
-        return redirect(url_for('recordings.index'))
-
-    # If they're a full admin, redirect to main admin dashboard
-    if current_user.is_admin:
-        return redirect(url_for('admin.admin'))
-
-    user_language = current_user.ui_language if current_user.is_authenticated and current_user.ui_language else 'en'
-    return render_template('group-admin.html',
-                         title='Group Management',
-                         groups_title=translate('nav.groupManagement', user_language),
-                         global_retention_days=_self.GLOBAL_RETENTION_DAYS,
-                         user_language=user_language)
-
+    return redirect(url_for('recordings.index'))
 
 
 def _text_order(column):

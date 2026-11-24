@@ -14,7 +14,6 @@ identically. Precedence, highest first:
     explicit per-request override
       > first tag's defaults
       > folder defaults
-      > environment defaults (ASR_MIN_SPEAKERS / ASR_MAX_SPEAKERS)
       > owner (account) defaults
       > admin-curated model default
 
@@ -112,8 +111,6 @@ def resolve_transcription_params(recording=None, overrides=None, *, tags=None, f
         initial_prompt, transcription_model — identical in shape across every
         ingestion path.
     """
-    from src.config.app_config import ASR_MIN_SPEAKERS, ASR_MAX_SPEAKERS
-
     overrides = overrides or {}
 
     # Derive context from the recording when given; otherwise the caller (upload,
@@ -184,14 +181,8 @@ def resolve_transcription_params(recording=None, overrides=None, *, tags=None, f
         if not transcription_model and folder.default_transcription_model:
             transcription_model = folder.default_transcription_model
 
-    # Environment defaults.
-    if min_speakers is None and ASR_MIN_SPEAKERS:
-        min_speakers, min_level = _int_or_none(ASR_MIN_SPEAKERS), 3
-    if max_speakers is None and ASR_MAX_SPEAKERS:
-        max_speakers, max_level = _int_or_none(ASR_MAX_SPEAKERS), 3
-
     # A minimum above the maximum can only come from two levels (a tag minimum
-    # of 6 with ASR_MAX_SPEAKERS=5, #415). The bound from the closer level
+    # of 6 and a folder maximum of 5, #415). The bound from the closer level
     # wins and the other follows it; within one level the request is kept.
     if min_speakers and max_speakers and min_speakers > max_speakers:
         if (min_level or 0) <= (max_level or 0):

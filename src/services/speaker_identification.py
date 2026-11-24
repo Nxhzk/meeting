@@ -76,7 +76,7 @@ def identify_speakers_from_transcript(transcription_data, user_id, candidate_nam
     current_app.logger.info(f"[Auto-Identify] Speaker labels: {speaker_labels}")
 
     # Apply configurable transcript length limit
-    transcript_limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+    transcript_limit = SystemSetting.get_setting('transcript_length_limit', -1)
     if transcript_limit == -1:
         transcript_text = formatted_transcription
     else:

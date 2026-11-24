@@ -1,12 +1,9 @@
 """
 Transcription service package.
 
-Provides a connector-based architecture for speech-to-text transcription
-with support for multiple providers:
-
-- OpenAI Whisper (whisper-1)
-- OpenAI GPT-4o Transcribe (gpt-4o-transcribe, gpt-4o-mini-transcribe, gpt-4o-transcribe-diarize)
-- Custom ASR endpoints (whisper-asr-webservice, WhisperX, etc.)
+Speech-to-text goes through Alibaba Cloud ASR, the only connector. The
+connector layer remains so the rest of the app asks the registry for the active
+connector, its name and its capabilities.
 
 Usage:
     from src.services.transcription import (
@@ -58,12 +55,7 @@ from .registry import (
     supports_diarization,
 )
 
-from .connectors import (
-    OpenAIWhisperConnector,
-    OpenAITranscribeConnector,
-    ASREndpointConnector,
-    AlibabaFunASRConnector,
-)
+from .connectors import AliyunASRConnector
 
 __all__ = [
     # Base types
@@ -93,8 +85,5 @@ __all__ = [
     'supports_diarization',
 
     # Connectors
-    'OpenAIWhisperConnector',
-    'OpenAITranscribeConnector',
-    'ASREndpointConnector',
-    'AlibabaFunASRConnector',
+    'AliyunASRConnector',
 ]

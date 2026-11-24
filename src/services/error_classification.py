@@ -54,7 +54,7 @@ def is_permanent_error(error_str: str) -> bool:
         'payment required',
         'quota exceeded',
         'insufficient funds',
-        # A paid submission with no clear outcome (Tencent ASR); only a
+        # A paid submission with no clear outcome (Aliyun ASR); only a
         # reprocess, which starts a new job, submits it again.
         'had no clear outcome',
         'model not found',

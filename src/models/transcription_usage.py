@@ -13,7 +13,7 @@ class TranscriptionUsage(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     date = db.Column(db.Date, nullable=False, default=date.today)
-    connector_type = db.Column(db.String(50), nullable=False)  # 'openai_whisper', 'openai_transcribe', 'asr_endpoint'
+    connector_type = db.Column(db.String(50), nullable=False)  # 'aliyun_asr'
 
     # Audio duration tracking (in seconds for precision)
     audio_duration_seconds = db.Column(db.Integer, default=0)

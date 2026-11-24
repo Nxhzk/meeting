@@ -9,7 +9,7 @@ import hmac
 import os
 import re
 import mimetypes
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, session, current_app, make_response
+from flask import Blueprint, request, redirect, url_for, flash, jsonify, session, current_app, make_response
 from markupsafe import escape
 from flask_login import login_user, logout_user, login_required, current_user
 from flask_wtf import FlaskForm
@@ -20,10 +20,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import markdown
 
 from src.database import db
-from src.models import User, SystemSetting, GroupMembership
+from src.meeting_web import form_errors, render_page
+from src.models import User, SystemSetting
 from src.utils import password_check, is_safe_url
 from src.services import audit, login_lock
-from src.utils.localization import format_file_size, format_number, translate, api_error, request_language, LazyTranslation
+from src.utils.localization import format_file_size, format_number, translate, api_error, LazyTranslation
 from src.auth.sso import (
     init_sso_client,
     is_sso_enabled,
@@ -51,21 +52,6 @@ from src.services.email import (
 # Create blueprint
 auth_bp = Blueprint('auth', __name__)
 
-
-@auth_bp.context_processor
-def inject_page_translation():
-    """Server-side text for the sign-in pages (login, register, auth/*).
-
-    These pages are plain forms that work without JavaScript, so their text
-    is translated here rather than by i18n.js: ``t('key', name=value)`` in
-    the viewer's language (their interface language when signed in, else
-    the browser's Accept-Language), and ``page_language`` for <html lang>.
-    """
-    language = request_language()
-    return {
-        't': lambda key, **params: translate(key, language, **params),
-        'page_language': language,
-    }
 
 # Import these from app after initialization
 bcrypt = None
@@ -288,6 +274,21 @@ def record_timezone():
     })
 
 
+def _registration_page(form):
+    return render_page('register', formUrl=url_for('auth.register'), errors=form_errors(form),
+                       email=form.email.data or '', username=form.username.data or '')
+
+
+def _check_email(email, action, show_resend=False):
+    messages = {
+        'verification': '如果收到验证邮件，请打开邮件中的链接完成验证。',
+        'verification_required': '请先验证邮箱，再登录。',
+        'password_reset': '如果邮箱与账号匹配，您会收到一封密码重置邮件。',
+    }
+    return render_page('email', email=email, emailMessage=messages[action],
+                       resendUrl=url_for('auth.resend_verification') if show_resend else None)
+
+
 @auth_bp.route('/register', methods=['GET', 'POST'])
 @rate_limit("10 per minute")
 def register():
@@ -303,7 +304,7 @@ def register():
         # Check if email domain is allowed
         if not is_registration_domain_allowed(form.email.data):
             flash(translate('server.flash.registrationRestricted'), 'danger')
-            return render_template('register.html', title='Register', form=form)
+            return _registration_page(form)
 
         hashed_password = bcrypt.generate_password_hash(form.password.data).decode('utf-8')
 
@@ -330,10 +331,7 @@ def register():
         # Send verification email if enabled
         if is_email_verification_enabled() and is_smtp_configured():
             if send_verification_email(user):
-                return render_template('auth/check_email.html',
-                                     title='Check Your Email',
-                                     email=user.email,
-                                     action='verification')
+                return _check_email(user.email, 'verification')
             else:
                 # Email failed to send, but account was created
                 flash(translate('server.flash.accountCreatedVerificationFailed'), 'warning')
@@ -342,7 +340,7 @@ def register():
         flash(translate('server.flash.accountCreated'), 'success')
         return redirect(url_for('auth.login'))
 
-    return render_template('register.html', title='Register', form=form)
+    return _registration_page(form)
 
 
 def _password_accepted(user, password):
@@ -433,11 +431,7 @@ def login():
                 _audit_login_failed(user, 'unverified_email')
                 # Store user email in session for resend functionality
                 session['unverified_email'] = user.email
-                return render_template('auth/check_email.html',
-                                     title='Email Verification Required',
-                                     email=user.email,
-                                     action='verification_required',
-                                     show_resend=True)
+                return _check_email(user.email, 'verification_required', show_resend=True)
 
             login_user(user, remember=form.remember.data)
             audit.record('auth.login.succeeded', actor_kind='session', actor_user_id=user.id,
@@ -447,13 +441,16 @@ def login():
                 return redirect(url_for('recordings.index'))
             return redirect(next_page) if next_page else redirect(url_for('recordings.index'))
 
-    return render_template(
-        'login.html',
-        title='Login',
-        form=form,
-        sso_enabled=sso_enabled,
-        sso_provider_name=sso_config.get('provider_name', 'SSO'),
-        password_login_disabled=password_login_disabled
+    next_page = request.args.get('next')
+    return render_page(
+        'login', formUrl=url_for('auth.login', next=next_page),
+        next=next_page, email=form.email.data or '', remember=bool(form.remember.data),
+        errors=form_errors(form), passwordLoginDisabled=password_login_disabled,
+        showPasswordForm=request.method == 'POST',
+        ssoUrl=url_for('auth.sso_login') if sso_enabled else None,
+        ssoProvider=sso_config.get('provider_name', 'SSO'),
+        registerUrl=url_for('auth.register') if registration_enabled() else None,
+        forgotUrl=url_for('auth.forgot_password'),
     )
 
 
@@ -606,21 +603,9 @@ def sso_unlink():
     return redirect(url_for('auth.account'))
 
 
-SIGNED_OUT_COOKIE = 'speakr_signed_out'
-
-
 def signed_out_redirect():
-    """The answer to a sign-out: the sign-in page, with a mark for its script.
-
-    The cookie speakr_signed_out tells static/js/service-worker-client.js on
-    the page that follows to clear what the account left in the browser
-    (sessionStorage, the IndexedDB stores with recordings, Cache Storage).
-    It holds no data, is readable by scripts on purpose, and is removed by
-    that script; without it, it ends with the browser session.
-    """
     response = redirect(url_for('auth.login'))
-    response.set_cookie(SIGNED_OUT_COOKIE, '1', secure=request.is_secure, httponly=False,
-                        samesite='Lax', path='/')
+    response.headers['Cache-Control'] = 'no-store'
     return response
 
 
@@ -660,7 +645,7 @@ def verify_email(token):
     user.email_verification_token = None  # Clear the token
     db.session.commit()
 
-    return render_template('auth/verify_success.html', title='Email Verified')
+    return render_page('verified')
 
 
 @auth_bp.route('/resend-verification', methods=['POST'])
@@ -697,22 +682,14 @@ def resend_verification():
     can_resend, remaining = can_resend_verification(user)
     if not can_resend:
         flash(translate('server.flash.verificationCooldown', seconds=remaining), 'warning')
-        return render_template('auth/check_email.html',
-                             title='Check Your Email',
-                             email=email,
-                             action='verification_required',
-                             show_resend=True)
+        return _check_email(email, 'verification_required', show_resend=True)
 
     if send_verification_email(user):
         flash(translate('server.flash.verificationResent'), 'success')
     else:
         flash(translate('server.flash.verificationSendFailed'), 'danger')
 
-    return render_template('auth/check_email.html',
-                         title='Check Your Email',
-                         email=email,
-                         action='verification',
-                         show_resend=True)
+    return _check_email(email, 'verification', show_resend=True)
 
 
 # --- Password Reset Routes ---
@@ -733,7 +710,7 @@ def forgot_password():
 
         if not email:
             flash(translate('server.flash.emailRequired'), 'danger')
-            return render_template('auth/forgot_password.html', title='Forgot Password')
+            return render_page('forgot', formUrl=url_for('auth.forgot_password'))
 
         user = User.find_by_email(email)
         # The account when it exists, never the typed address.
@@ -759,12 +736,9 @@ def forgot_password():
                 send_password_reset_email(user)
 
         flash(translate('server.flash.passwordResetSentIfExists'), 'info')
-        return render_template('auth/check_email.html',
-                             title='Check Your Email',
-                             email=email,
-                             action='password_reset')
+        return _check_email(email, 'password_reset')
 
-    return render_template('auth/forgot_password.html', title='Forgot Password')
+    return render_page('forgot', formUrl=url_for('auth.forgot_password'))
 
 
 @auth_bp.route('/reset-password/<token>', methods=['GET', 'POST'])
@@ -801,18 +775,18 @@ def reset_password(token):
 
         if not password or not confirm_password:
             flash(translate('server.flash.passwordFieldsRequired'), 'danger')
-            return render_template('auth/reset_password.html', title='Reset Password', token=token)
+            return render_page('reset', formUrl=url_for('auth.reset_password', token=token))
 
         if password != confirm_password:
             flash(translate('server.flash.passwordsDoNotMatch'), 'danger')
-            return render_template('auth/reset_password.html', title='Reset Password', token=token)
+            return render_page('reset', formUrl=url_for('auth.reset_password', token=token))
 
         # Validate password
         try:
             password_check(None, type('obj', (object,), {'data': password}))
         except ValidationError as e:
             flash(str(e), 'danger')
-            return render_template('auth/reset_password.html', title='Reset Password', token=token)
+            return render_page('reset', formUrl=url_for('auth.reset_password', token=token))
 
         # Update password
         hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
@@ -834,7 +808,7 @@ def reset_password(token):
         flash(translate('server.flash.passwordResetDone'), 'success')
         return redirect(url_for('auth.login'))
 
-    return render_template('auth/reset_password.html', title='Reset Password', token=token)
+    return render_page('reset', formUrl=url_for('auth.reset_password', token=token))
 
 
 def _storage_usage(user):
@@ -1083,135 +1057,12 @@ def account():
         else:
             return redirect(url_for('auth.account'))
 
-    from src.models import SystemSetting
-    # Get admin default prompt from system settings
-    admin_default_prompt = SystemSetting.get_setting('admin_default_summary_prompt', None)
-    if admin_default_prompt:
-        default_summary_prompt_text = admin_default_prompt
-    else:
-        # Fallback to the shipped default if admin hasn't set one.
-        from src.config.prompts import DEFAULT_SUMMARY_PROMPT
-        default_summary_prompt_text = DEFAULT_SUMMARY_PROMPT
-
-    # The title instructions a user gets when they leave their own blank.
-    from src.services.titling import user_title_instructions
-    default_title_prompt_text = user_title_instructions(None)[0]
-
-    USE_ASR_ENDPOINT = os.environ.get('USE_ASR_ENDPOINT', 'false').lower() == 'true'
-    USE_NEW_TRANSCRIPTION_ARCHITECTURE = os.environ.get('USE_NEW_TRANSCRIPTION_ARCHITECTURE', 'true').lower() == 'true'
-    ENABLE_AUTO_DELETION = bool(SystemSetting.get_setting('enable_auto_deletion', os.environ.get('ENABLE_AUTO_DELETION', 'false').lower() == 'true'))
-    ENABLE_INTERNAL_SHARING = bool(SystemSetting.get_setting('enable_internal_sharing', os.environ.get('ENABLE_INTERNAL_SHARING', 'false').lower() == 'true'))
-    ASR_RETURN_SPEAKER_EMBEDDINGS = os.environ.get('ASR_RETURN_SPEAKER_EMBEDDINGS', 'false').lower() == 'true'
-    ENABLE_AUTO_EXPORT = os.environ.get('ENABLE_AUTO_EXPORT', 'false').lower() == 'true'
-
-    # Get connector capabilities (new architecture)
-    connector_supports_diarization = USE_ASR_ENDPOINT  # Default to USE_ASR_ENDPOINT for backwards compat
-    connector_supports_hotwords = USE_ASR_ENDPOINT
-    connector_supports_initial_prompt = USE_ASR_ENDPOINT
-    connector_supports_language = USE_ASR_ENDPOINT
-    connector_supports_speaker_embeddings = ASR_RETURN_SPEAKER_EMBEDDINGS
-    if USE_NEW_TRANSCRIPTION_ARCHITECTURE:
-        try:
-            from src.services.transcription import get_registry
-            from src.services.transcription.base import TranscriptionCapability
-            registry = get_registry()
-            connector = registry.get_active_connector()
-            if connector:
-                connector_supports_diarization = connector.supports_diarization
-                connector_supports_hotwords = connector.supports_hotwords
-                connector_supports_initial_prompt = connector.supports_initial_prompt
-                connector_supports_language = connector.supports_language_selection
-                # Query the live instance: the asr_endpoint connector adds the
-                # SPEAKER_EMBEDDINGS capability conditionally (only when its env
-                # flag is on), so the class-level set would be wrong.
-                connector_supports_speaker_embeddings = connector.supports(
-                    TranscriptionCapability.SPEAKER_EMBEDDINGS
-                )
-        except Exception as e:
-            current_app.logger.warning(f"Could not get connector capabilities: {e}")
-
-    # Speaker auto-labelling comes in two flavours. When the connector returns
-    # voice embeddings, matching is biometric and tuned by a confidence
-    # threshold. When it diarizes but returns no embeddings, we fall back to a
-    # contextual LLM match; the toggle should still be offered in that case (the
-    # threshold does not apply). Surfacing both lets the account page show the
-    # toggle for embedding-less connectors, where it used to be hidden.
-    contextual_labelling_available = (
-        connector_supports_diarization and not connector_supports_speaker_embeddings
-    )
-
-    # Check if user is a team admin and get their admin groups
-    admin_memberships = GroupMembership.query.filter_by(
-        user_id=current_user.id,
-        role='admin'
-    ).all()
-
-    is_team_admin = len(admin_memberships) > 0
-
-    # Build list of groups where user is admin (for tag assignment)
-    user_admin_groups = []
-    for membership in admin_memberships:
-        if membership.group:
-            user_admin_groups.append({
-                'id': membership.group.id,
-                'name': membership.group.name
-            })
-
-    sso_config = get_sso_config()
-    sso_enabled = is_sso_enabled()
-    if sso_enabled:
-        init_sso_client(current_app)
-    sso_linked = bool(current_user.sso_subject)
-
-    password_login_disabled = sso_enabled and sso_config.get('disable_password_login', False)
-
-    # Check if admin has globally disabled auto-summarization or auto-translation
-    admin_disabled_auto_summarization = _admin_disabled_setting('disable_auto_summarization', False)
-    auto_translation_available = not _admin_disabled_setting('disable_auto_translation', True)
-    from src.models import SystemSetting as _SS
-    r=_SS.query.filter_by(key='disable_auto_translation').first()
-    from src.models.system import _SYSTEM_SETTING_CACHE_GENERATION
-
-    # Get user's UI language preference
-    user_language = current_user.ui_language if current_user.ui_language else 'en'
-
-    from src.services.inquire_agent import get_availability as _get_inquire_availability
-    _inquire_availability = _get_inquire_availability(current_user)
-
-    return render_template('account.html',
-                           title='Account',
-                           storage_usage=_storage_usage(current_user),
-                           usage_limits=_usage_limits(current_user),
-                           default_summary_prompt_text=default_summary_prompt_text,
-                           default_title_prompt_text=default_title_prompt_text,
-                           use_asr_endpoint=USE_ASR_ENDPOINT,
-                           connector_supports_diarization=connector_supports_diarization,
-                           connector_supports_hotwords=connector_supports_hotwords,
-                           connector_supports_initial_prompt=connector_supports_initial_prompt,
-                           connector_supports_language=connector_supports_language,
-                           enable_auto_deletion=ENABLE_AUTO_DELETION,
-                           enable_internal_sharing=ENABLE_INTERNAL_SHARING,
-                           user_admin_groups=user_admin_groups,
-                           is_team_admin=is_team_admin,
-                           sso_enabled=sso_enabled,
-                           sso_provider_name=sso_config.get('provider_name', 'SSO'),
-                           sso_linked=sso_linked,
-                           sso_subject=current_user.sso_subject,
-                           has_password=bool(current_user.password),
-                           password_login_disabled=password_login_disabled,
-                           speaker_embeddings_enabled=connector_supports_speaker_embeddings,
-                           email_notifications_available=_email_notifications_available(current_user),
-                           contextual_labelling_available=contextual_labelling_available,
-                           auto_speaker_labelling=current_user.auto_speaker_labelling,
-                           auto_speaker_labelling_threshold=current_user.auto_speaker_labelling_threshold or 'medium',
-                           admin_disabled_auto_summarization=admin_disabled_auto_summarization,
-                           auto_translation_available=auto_translation_available,
-                           auto_summarization=current_user.auto_summarization if current_user.auto_summarization is not None else True,
-                           inquire_allow_summaries=_inquire_availability['summaries'],
-                           inquire_allow_notes=_inquire_availability['notes'],
-                           user_language=user_language,
-                           enable_auto_export=ENABLE_AUTO_EXPORT,
-                           enable_auto_processing=os.environ.get('ENABLE_AUTO_PROCESSING', 'false').lower() == 'true')
+    password_disabled = is_sso_enabled() and get_sso_config().get('disable_password_login', False)
+    return render_page('account', formUrl=url_for('auth.account'), passwordUrl=url_for('auth.change_password'),
+                       canChangePassword=bool(current_user.password and (current_user.is_admin or not password_disabled)),
+                       profile={'username': current_user.username, 'email': current_user.email,
+                                'name': current_user.name or '', 'jobTitle': current_user.job_title or '',
+                                'company': current_user.company or ''})
 
 
 @auth_bp.route('/api/user/auto-speaker-labelling', methods=['POST'])

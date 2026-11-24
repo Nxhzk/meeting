@@ -17,15 +17,8 @@ if TEXT_MODEL_BASE_URL:
     TEXT_MODEL_BASE_URL = TEXT_MODEL_BASE_URL.split('#')[0].strip()
 TEXT_MODEL_NAME = os.environ.get("TEXT_MODEL_NAME", "openai/gpt-3.5-turbo")
 
-transcription_api_key = os.environ.get("TRANSCRIPTION_API_KEY", "")
-transcription_base_url = os.environ.get("TRANSCRIPTION_BASE_URL", "")
-if transcription_base_url:
-    transcription_base_url = transcription_base_url.split('#')[0].strip()
-
-# New transcription connector configuration
-# TRANSCRIPTION_CONNECTOR: explicit connector name (openai_whisper, openai_transcribe, asr_endpoint)
-# TRANSCRIPTION_MODEL: model to use (e.g., gpt-4o-transcribe-diarize for diarization)
-TRANSCRIPTION_CONNECTOR = os.environ.get('TRANSCRIPTION_CONNECTOR', '').lower().strip()
+# Transcription goes through Alibaba Cloud ASR (Model Studio / DashScope) (see src/services/transcription).
+# TRANSCRIPTION_MODEL: the model name shown as the default when a list is offered.
 TRANSCRIPTION_MODEL = os.environ.get('TRANSCRIPTION_MODEL', '')
 if TRANSCRIPTION_MODEL:
     TRANSCRIPTION_MODEL = TRANSCRIPTION_MODEL.split('#')[0].strip()
@@ -33,8 +26,8 @@ if TRANSCRIPTION_MODEL:
 # Optional comma-separated list of transcription models the user can pick from
 # at upload/reprocess time, or set as a default on a tag/folder. When empty,
 # the model dropdown is hidden and TRANSCRIPTION_MODEL above is the only model.
-# Example: TRANSCRIPTION_MODELS_AVAILABLE=whisper-1,gpt-4o-transcribe,gpt-4o-transcribe-diarize
-# Optional parallel labels: TRANSCRIPTION_MODEL_LABELS=Whisper,GPT-4o,GPT-4o Diarize
+# Example: TRANSCRIPTION_MODELS_AVAILABLE=fun-asr,paraformer-v2
+# Optional parallel labels: TRANSCRIPTION_MODEL_LABELS=Meeting,General
 def _parse_models_csv(raw):
     return [m.strip() for m in raw.split(',') if m.strip()]
 
@@ -47,41 +40,10 @@ TRANSCRIPTION_MODEL_OPTIONS = [
     for i, m in enumerate(TRANSCRIPTION_MODELS_AVAILABLE)
 ]
 
-# Feature flag for new transcription architecture (default: enabled)
-USE_NEW_TRANSCRIPTION_ARCHITECTURE = os.environ.get(
-    'USE_NEW_TRANSCRIPTION_ARCHITECTURE', 'true'
-).lower() == 'true'
+# The connector layer is the only transcription path.
+USE_NEW_TRANSCRIPTION_ARCHITECTURE = True
 
-USE_ASR_ENDPOINT = os.environ.get('USE_ASR_ENDPOINT', 'false').lower() == 'true'
-ASR_BASE_URL = os.environ.get('ASR_BASE_URL')
-if ASR_BASE_URL:
-    ASR_BASE_URL = ASR_BASE_URL.split('#')[0].strip()
-
-# The ASR connector is active with ASR_BASE_URL alone, or by name; the
-# USE_ASR_ENDPOINT flag is deprecated. Reading these settings only behind the
-# flag dropped ASR_MIN_SPEAKERS / ASR_MAX_SPEAKERS for every installation set
-# up as documented (#415).
-_ASR_CONNECTOR_ACTIVE = (
-    USE_ASR_ENDPOINT
-    or bool(ASR_BASE_URL)
-    or os.environ.get('TRANSCRIPTION_CONNECTOR', '').strip().lower() == 'asr_endpoint'
-)
-
-if _ASR_CONNECTOR_ACTIVE:
-    ASR_DIARIZE = os.environ.get('ASR_DIARIZE', 'true').lower() == 'true'
-    ASR_MIN_SPEAKERS = os.environ.get('ASR_MIN_SPEAKERS')
-    ASR_MAX_SPEAKERS = os.environ.get('ASR_MAX_SPEAKERS')
-    # Speaker embeddings are only supported by WhisperX ASR service, not the basic whisper-asr-webservice
-    ASR_RETURN_SPEAKER_EMBEDDINGS = os.environ.get('ASR_RETURN_SPEAKER_EMBEDDINGS', 'false').lower() == 'true'
-else:
-    ASR_DIARIZE = False
-    ASR_MIN_SPEAKERS = None
-    ASR_MAX_SPEAKERS = None
-    ASR_RETURN_SPEAKER_EMBEDDINGS = False
-
-# ASR chunking configuration - enables app-level chunking for self-hosted ASR services
-# that may crash on long files due to GPU memory exhaustion
-ASR_ENABLE_CHUNKING = os.environ.get('ASR_ENABLE_CHUNKING', 'false').lower() == 'true'
+ENABLE_CHUNKING = os.environ.get('ASR_ENABLE_CHUNKING', 'false').lower() == 'true'
 ASR_MAX_DURATION_SECONDS = int(os.environ.get('ASR_MAX_DURATION_SECONDS', '7200'))  # 2 hours default
 
 ENABLE_CHUNKING = os.environ.get('ENABLE_CHUNKING', 'true').lower() == 'true'
@@ -192,28 +154,9 @@ def initialize_config(app):
 
         except Exception as e:
             app.logger.error(f"Failed to initialize transcription connector: {e}")
-            app.logger.error("Falling back to legacy transcription configuration validation")
-            # Fall through to legacy validation
-            _validate_legacy_transcription_config(app)
-    else:
-        # Legacy configuration validation
-        _validate_legacy_transcription_config(app)
+            sys.exit(1)
 
     return client, chunking_service, version
-
-
-def _validate_legacy_transcription_config(app):
-    """Validate legacy transcription configuration (backwards compatibility)."""
-    if USE_ASR_ENDPOINT:
-        if not ASR_BASE_URL:
-            app.logger.error("ERROR: ASR enabled but ASR_BASE_URL not configured!")
-            sys.exit(1)
-        app.logger.info(f"Using ASR endpoint: {ASR_BASE_URL}")
-    else:
-        if not transcription_base_url or not transcription_api_key:
-            app.logger.error("ERROR: No transcription service configured!")
-            sys.exit(1)
-        app.logger.info(f"Using Whisper API: {transcription_base_url}")
 
 
 # Hot-applied System Settings (high priority) with environment fallback.

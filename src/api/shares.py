@@ -10,7 +10,7 @@ This blueprint handles:
 import os
 import re
 import json
-from flask import Blueprint, render_template, request, redirect, url_for, jsonify, send_file, current_app
+from flask import Blueprint, request, redirect, url_for, jsonify, send_file, current_app
 from flask_login import login_required, current_user
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import HTTPException
@@ -18,17 +18,13 @@ from werkzeug.exceptions import HTTPException
 from src.database import db
 from src.models import Recording, Share, InternalShare, SharedRecordingState, User, TranscriptChunk, Folder
 from src.services import audit
-from src.utils import md_to_html
 from src.utils.route_errors import internal_error
 from src.services.storage import get_storage_service
 from src.services.public_shares import active_share_or_404, link_is_https, public_url
 from src.utils.mime import served_media_mime, sandbox_media_response
 from src.utils.log_filters import loggable_error, loggable_locator
-from src.utils.localization import api_error, translate, request_language
+from src.utils.localization import api_error, translate
 from src.utils.request_body import json_body
-
-# Configuration from environment
-READABLE_PUBLIC_LINKS = os.environ.get('READABLE_PUBLIC_LINKS', 'false').lower() == 'true'
 
 # Create blueprint
 shares_bp = Blueprint('shares', __name__)
@@ -143,29 +139,18 @@ def view_shared_recording(public_id):
     recording = share.recording
     _audit_public_link('share.public.opened', share)
 
-    # Create a limited dictionary for the public view. templates/share.html
-    # embeds it as JSON for static/js/share-page.js: nothing may be added here
-    # that a person with only the link should not see.
-    recording_data = {
-        'public_id': share.public_id,
-        'title': recording.title,
-        'transcript': public_transcript(recording.transcription),
-        'summary': md_to_html(recording.summary) if share.share_summary else None,
-        'summary_raw': recording.summary if share.share_summary else None,
-        'notes': md_to_html(recording.notes) if share.share_notes else None,
-        'notes_raw': recording.notes if share.share_notes else None,
-        'meeting_date': recording.meeting_date.isoformat() if recording.meeting_date else None,
-        'mime_type': recording.mime_type,
-        'audio_deleted_at': recording.audio_deleted_at.isoformat() if recording.audio_deleted_at else None,
-        'audio_duration': recording.get_audio_duration()
-    }
-
-    # The viewer's language for the embedded translations: their interface
-    # language when signed in, otherwise the browser's Accept-Language.
-    # With READABLE_PUBLIC_LINKS the transcript is also in the page as plain
-    # HTML (in <noscript>), for readers that do not run the page's script.
-    return render_template('share.html', recording=recording_data,
-                           readable_mode=READABLE_PUBLIC_LINKS, user_language=request_language())
+    from src.api.meetings import document_html, transcript_rows
+    from src.meeting_web import render_page
+    return render_page('share', meeting={
+        'title': recording.title or '会议记录',
+        'transcript': transcript_rows(recording.transcription),
+        'summary_html': document_html(recording.summary) if share.share_summary else '',
+        'notes_html': document_html(recording.notes) if share.share_notes else '',
+        'date': (recording.meeting_date or recording.created_at).isoformat() + 'Z' if recording.meeting_date or recording.created_at else None,
+        'audio_url': url_for('shares.get_shared_audio', public_id=public_id)
+                     if recording.audio_path and not recording.audio_deleted_at else None,
+        'duration': recording.get_audio_duration(allow_probe_fallback=False),
+    })
 
 
 @shares_bp.route('/share/audio/<string:public_id>')

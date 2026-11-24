@@ -123,6 +123,19 @@ for _error in (TEXT_MODEL_EXTRA_BODY_ERROR, CHAT_MODEL_EXTRA_BODY_ERROR, TRANSLA
 # Streaming options - disable for LLM servers that don't support OpenAI's stream_options
 ENABLE_STREAM_OPTIONS = os.environ.get("ENABLE_STREAM_OPTIONS", "true").lower() == "true"
 
+# The one model this deployment talks to (deepseek-v4.1-flash through the
+# WorkBuddy2API gateway) takes a 1,000,000-token context and writes up to this
+# many tokens. Every call that sets an output budget defaults to the maximum;
+# an env var named in the call (SUMMARY_MAX_TOKENS ...) can still lower it.
+MODEL_MAX_OUTPUT_TOKENS = 393216
+
+
+def max_output_tokens(env_name):
+    """Output-token budget for one kind of call: env_name when set, else the model maximum."""
+    raw = (os.environ.get(env_name) or '').strip()
+    return int(raw) if raw else MODEL_MAX_OUTPUT_TOKENS
+
+
 # LLM timeout and retry configuration
 # Read timeout controls how long to wait for model inference (the bottleneck for local models)
 # Connect/write stay short so misconfigured URLs fail fast instead of hanging

@@ -270,7 +270,6 @@ class AudioChunkingService:
     def needs_chunking(
         self,
         file_path: str,
-        use_asr_endpoint: bool = False,
         connector_specs: Optional['ConnectorSpecifications'] = None
     ) -> bool:
         """
@@ -289,7 +288,6 @@ class AudioChunkingService:
 
         Args:
             file_path: Path to the audio file
-            use_asr_endpoint: DEPRECATED - use connector_specs instead
             connector_specs: Optional ConnectorSpecifications from the active connector
 
         Returns:
@@ -301,11 +299,6 @@ class AudioChunkingService:
         # If chunking is disabled (by connector or user), return False
         if not chunking_config.enabled:
             logger.info(f"Chunking disabled (source: {chunking_config.source})")
-            return False
-
-        # Legacy fallback: if no connector_specs provided, check use_asr_endpoint
-        if connector_specs is None and use_asr_endpoint:
-            logger.info("Chunking: ASR endpoint detected (legacy), no chunking needed")
             return False
 
         try:

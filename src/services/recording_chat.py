@@ -198,7 +198,7 @@ def build_chat_messages(recording, user, message, history=None, with_sources=Fal
             template_format=resolve_timestamp_template_format(
                 user, user.chat_timestamp_template_id) if include_timestamps else None,
         )
-    limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+    limit = SystemSetting.get_setting('transcript_length_limit', -1)
     if limit != -1:
         transcript = transcript[:limit]
 

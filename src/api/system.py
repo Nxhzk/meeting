@@ -18,7 +18,7 @@ from src.utils.route_errors import internal_error
 from src.config.version import get_version
 from src.utils.localization import format_file_size, api_error, translate
 from src.services.llm import TEXT_MODEL_BASE_URL, TEXT_MODEL_NAME
-from src.config.app_config import ASR_BASE_URL, USE_NEW_TRANSCRIPTION_ARCHITECTURE, TRANSCRIPTION_MODEL_OPTIONS
+from src.config.app_config import USE_NEW_TRANSCRIPTION_ARCHITECTURE, TRANSCRIPTION_MODEL_OPTIONS
 from src.services.token_tracking import token_tracker
 from src.services.transcription import TranscriptionCapability
 from src.utils.request_body import json_object_body
@@ -27,7 +27,6 @@ from src.utils.request_body import json_object_body
 system_bp = Blueprint('system', __name__)
 
 # Configuration from environment
-USE_ASR_ENDPOINT = os.environ.get('USE_ASR_ENDPOINT', 'false').lower() == 'true'
 ENABLE_CHUNKING = os.environ.get('ENABLE_CHUNKING', 'true').lower() == 'true'
 ENABLE_AUTO_EXPORT = os.environ.get('ENABLE_AUTO_EXPORT', 'false').lower() == 'true'
 
@@ -210,7 +209,7 @@ def get_system_info():
         transcription_info = {
             'connector': 'unknown',
             'model': None,
-            'supports_diarization': USE_ASR_ENDPOINT,  # Backwards compatible default
+            'supports_diarization': False,
             'supports_speaker_embeddings': False,
         }
 
@@ -229,29 +228,15 @@ def get_system_info():
             except Exception as e:
                 current_app.logger.warning(f"Could not get connector info: {e}")
 
-        # Determine ASR status from connector (new arch) or env var (legacy)
-        is_asr_connector = transcription_info.get('connector') == 'asr_endpoint'
-        asr_enabled = is_asr_connector or USE_ASR_ENDPOINT
-
-        # Determine the active transcription endpoint based on which connector is in use
-        if asr_enabled:
-            active_endpoint = ASR_BASE_URL
-        else:
-            active_endpoint = os.environ.get('TRANSCRIPTION_BASE_URL', 'https://api.openai.com/v1')
-
         info = {
             'version': version,
             'llm_model': TEXT_MODEL_NAME,
-            'asr_enabled': asr_enabled,
             'transcription': transcription_info,
         }
         if current_user.is_admin:
             info.update({
                 'llm_endpoint': TEXT_MODEL_BASE_URL,
-                'transcription_endpoint': active_endpoint,  # The actual endpoint being used
-                # Legacy fields for backwards compatibility
-                'whisper_endpoint': os.environ.get('TRANSCRIPTION_BASE_URL', 'https://api.openai.com/v1'),
-                'asr_endpoint': ASR_BASE_URL if asr_enabled else None,
+                'transcription_endpoint': 'https://dashscope.aliyuncs.com',
             })
         return jsonify(info)
     except Exception as e:
@@ -335,14 +320,12 @@ def get_config():
         # when the user can remove audio by hand (same right as deleting).
         enable_audio_removed_filter = (_self.ENABLE_AUTO_DELETION and _self.DELETION_MODE == 'audio_only') or can_delete
 
-        # Get connector capabilities (new architecture)
-        # Defaults to USE_ASR_ENDPOINT for backwards compatibility
-        connector_supports_diarization = USE_ASR_ENDPOINT
-        connector_supports_speaker_count = USE_ASR_ENDPOINT  # ASR endpoint supports min/max speakers
-        connector_supports_exact_speaker_count = False  # Exact-N connectors (openasr) declare it (#362)
-        connector_supports_hotwords = USE_ASR_ENDPOINT
-        connector_supports_initial_prompt = USE_ASR_ENDPOINT
-        is_asr_connector = False
+        # Get connector capabilities from the active connector
+        connector_supports_diarization = False
+        connector_supports_speaker_count = False
+        connector_supports_exact_speaker_count = False
+        connector_supports_hotwords = False
+        connector_supports_initial_prompt = False
         if USE_NEW_TRANSCRIPTION_ARCHITECTURE:
             try:
                 from src.services.transcription import get_registry
@@ -354,12 +337,8 @@ def get_config():
                     connector_supports_exact_speaker_count = connector.supports_exact_speaker_count
                     connector_supports_hotwords = connector.supports_hotwords
                     connector_supports_initial_prompt = connector.supports_initial_prompt
-                    is_asr_connector = registry.get_active_connector_name() == 'asr_endpoint'
             except Exception as e:
                 current_app.logger.warning(f"Could not get connector capabilities: {e}")
-
-        # Derive ASR status from connector or legacy env var
-        asr_enabled = is_asr_connector or USE_ASR_ENDPOINT
 
         # Get user's default transcription language if authenticated
         user_transcription_language = ''
@@ -384,7 +363,6 @@ def get_config():
             'recording_disclaimer': SystemSetting.get_setting('recording_disclaimer', ''),
             'upload_disclaimer': SystemSetting.get_setting('upload_disclaimer', ''),
             'custom_banner': SystemSetting.get_setting('custom_banner', ''),
-            'use_asr_endpoint': asr_enabled,  # Derived from connector or legacy env var
             'connector_supports_diarization': connector_supports_diarization,  # Connector capability
             'connector_supports_speaker_count': connector_supports_speaker_count,  # Min/max speakers
             'connector_supports_exact_speaker_count': connector_supports_exact_speaker_count,  # Exact-N only (#362)

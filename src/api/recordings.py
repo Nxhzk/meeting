@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from src.services.llm_settings import get_temperature
 from src.services.job_queue import job_queue
 from src.services import audit
-from flask import Blueprint, render_template, request, redirect, url_for, jsonify, send_file, Response, current_app, make_response
+from flask import Blueprint, request, redirect, url_for, jsonify, send_file, Response, current_app, make_response
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -51,6 +51,7 @@ from src.services.document import (
     new_document, process_markdown_to_docx,
 )
 from src.services.llm import client, chat_client, call_chat_completion, process_streaming_with_thinking, TokenBudgetExceeded
+from src.services.llm import max_output_tokens
 from src.services.embeddings import process_recording_chunks
 from src.file_exporter import export_recording
 from src.utils.mime import served_media_mime, sandbox_media_response
@@ -73,7 +74,6 @@ recordings_bp = Blueprint('recordings', __name__)
 
 # Configuration from environment
 ENABLE_INQUIRE_MODE = os.environ.get('ENABLE_INQUIRE_MODE', 'false').lower() == 'true'
-USE_ASR_ENDPOINT = os.environ.get('USE_ASR_ENDPOINT', 'false').lower() == 'true'
 ENABLE_CHUNKING = os.environ.get('ENABLE_CHUNKING', 'true').lower() == 'true'
 
 
@@ -1098,139 +1098,14 @@ def _assistant_library_tools():
     return bool(ENABLE_INQUIRE_MODE and agent_enabled())
 
 
-def _text_model_configured():
-    from src.services.llm import TEXT_MODEL_CONFIGURED
-    return TEXT_MODEL_CONFIGURED
-
-
 @recordings_bp.route('/')
 @recordings_bp.route('/recordings/<int:recording_id>')
 @recordings_bp.route('/label/<label_name>')
 @login_required
 def index(recording_id=None, label_name=None):
-    # Default to the simple meeting page. Preserve the original workspace,
-    # existing recording deep links and explicit share/upload/settings URLs.
-    if (recording_id is None and label_name is None
-            and request.args.get('view') != 'full'
-            and not any(key in request.args for key in ('open', 'upload', 'share_target', 'share_target_error'))):
-        from src.api.meetings import home
-        return home()
-
-    # recording_id is a deep link (#301): the server just serves the SPA shell
-    # here; the frontend reads it from the path and pre-selects the recording.
-    # label_name works the same way for /label/<name>: the shell is served and
-    # the frontend resolves the name against the viewer's own accessible tags
-    # and applies it as the tag filter, so one link points at a group of
-    # recordings. Neither value is used server-side.
-    # Check if user is a group admin
-    is_team_admin = GroupMembership.query.filter_by(
-        user_id=current_user.id,
-        role='admin'
-    ).first() is not None
-
-    # Pass the ASR config, inquire mode config, and user language preference to the template
-    user_language = current_user.ui_language if current_user.is_authenticated and current_user.ui_language else 'en'
-
-    # Default target language for the translation modal: the account's
-    # preferred output language, falling back to the interface language
-    # (translation spec). The endpoint applies the same fallback when no
-    # target is sent, so the modal simply shows what will be used.
-    default_translation_language = ''
-    if current_user.is_authenticated:
-        if getattr(current_user, 'output_language', None):
-            default_translation_language = _canonical_translation_language(current_user.output_language) or ''
-        if not default_translation_language:
-            from src.utils.language import output_language_name_for_code
-            default_translation_language = output_language_name_for_code(user_language) or ''
-
-    # The "Audio removed" filter matters when retention removes audio; users
-    # who can delete recordings can also remove audio by hand.
-    enable_audio_removed_filter = (_self.ENABLE_AUTO_DELETION and _self.DELETION_MODE == 'audio_only') or _self.USERS_CAN_DELETE or current_user.is_admin
-
-    # Get connector capabilities (new architecture)
-    # Defaults to USE_ASR_ENDPOINT for backwards compatibility
-    connector_supports_diarization = USE_ASR_ENDPOINT
-    connector_supports_speaker_count = USE_ASR_ENDPOINT  # ASR endpoint supports min/max speakers
-    connector_supports_exact_speaker_count = False  # Exact-N connectors (openasr) declare it (#362)
-    connector_supports_hotwords = USE_ASR_ENDPOINT
-    connector_supports_initial_prompt = USE_ASR_ENDPOINT
-    connector_supports_language = USE_ASR_ENDPOINT
-    if USE_NEW_TRANSCRIPTION_ARCHITECTURE:
-        try:
-            from src.services.transcription import get_registry
-            registry = get_registry()
-            connector = registry.get_active_connector()
-            if connector:
-                connector_supports_diarization = connector.supports_diarization
-                connector_supports_speaker_count = connector.supports_speaker_count_control
-                connector_supports_exact_speaker_count = connector.supports_exact_speaker_count
-                connector_supports_hotwords = connector.supports_hotwords
-                connector_supports_initial_prompt = connector.supports_initial_prompt
-                connector_supports_language = connector.supports_language_selection
-        except Exception as e:
-            current_app.logger.warning(f"Could not get connector capabilities: {e}")
-
-    # Phase B of #287 (c)(d): server-side chunk streaming for in-app
-    # recordings. Off by default; enabling the env var flips the
-    # data-server-recording-chunks attribute and the audio composable
-    # opens an /upload/session for each in-app recording instead of
-    # accumulating the whole blob in RAM.
-    server_recording_chunks_enabled = os.environ.get(
-        'ENABLE_SERVER_RECORDING_CHUNKS', 'false'
-    ).lower() == 'true'
-
-    # Absolute hours ceiling on in-app recordings (Phase C of #287 c/d).
-    # Replaces the legacy hard-stop-on-size behaviour for users with
-    # server-side streaming enabled; size-based stop still applies as a
-    # fallback when streaming is off.
-    try:
-        recording_max_hours = float(os.environ.get('RECORDING_MAX_HOURS', '8'))
-    except (TypeError, ValueError):
-        recording_max_hours = 8.0
-
-    # MediaRecorder timeslice (seconds) for in-app recordings: how often a
-    # chunk is emitted and streamed to the server. Smaller = finer crash
-    # recovery but more requests / files / DB commits; larger = less server
-    # load. Default 5s. At scale (many concurrent recorders on SQLite) raise
-    # this and/or RECORDING_SESSION_COMMIT_BATCH_SIZE. Clamped to [1, 60].
-    try:
-        recording_chunk_seconds = int(float(os.environ.get('RECORDING_CHUNK_SECONDS', '5')))
-    except (TypeError, ValueError):
-        recording_chunk_seconds = 5
-    recording_chunk_seconds = max(1, min(60, recording_chunk_seconds))
-
-    # Video bitrate cap (kbps) for the opt-in tab/window/screen video capture
-    # (#303). Screen content compresses well, so the 2500 kbps default keeps
-    # an hour of capture near 1 GB. Clamped to [100, 50000].
-    try:
-        recording_video_kbps = int(float(os.environ.get('RECORDING_VIDEO_KBPS', '2500')))
-    except (TypeError, ValueError):
-        recording_video_kbps = 2500
-    recording_video_kbps = max(100, min(50000, recording_video_kbps))
-
-    return render_template('index.html',
-                         use_asr_endpoint=USE_ASR_ENDPOINT,  # Backwards compat
-                         connector_supports_diarization=connector_supports_diarization,
-                         connector_supports_speaker_count=connector_supports_speaker_count,
-                         connector_supports_exact_speaker_count=connector_supports_exact_speaker_count,
-                         connector_supports_hotwords=connector_supports_hotwords,
-                         connector_supports_initial_prompt=connector_supports_initial_prompt,
-                         connector_supports_language=connector_supports_language,
-                         inquire_mode_enabled=ENABLE_INQUIRE_MODE,
-                         enable_audio_removed_filter=enable_audio_removed_filter,
-                         enable_internal_sharing=_self.ENABLE_INTERNAL_SHARING,
-                         user_language=user_language,
-                         default_translation_language=default_translation_language,
-                         is_team_admin=is_team_admin,
-                         server_recording_chunks_enabled=server_recording_chunks_enabled,
-                         recording_max_hours=recording_max_hours,
-                         # How long the offline recorder's note lasts after
-                         # this load (REMEMBER_COOKIE_DAYS, #650).
-                         remember_cookie_days=current_app.config['REMEMBER_COOKIE_DURATION'].days,
-                         recording_chunk_seconds=recording_chunk_seconds,
-                         recording_video_kbps=recording_video_kbps,
-                         text_model_configured=_text_model_configured())
-
+    """Old recording URLs remain valid without exposing the old workspace."""
+    from src.api.meetings import home
+    return home(recording_id or request.args.get('recording_id', type=int))
 
 
 def get_accessible_recording_ids(user_id):
@@ -3478,7 +3353,7 @@ def chat_with_transcription():
         recording_scope = None
         if _assistant_library_tools():
             filters = {}
-            limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+            limit = SystemSetting.get_setting('transcript_length_limit', -1)
             recording_scope = {
                 'messages': messages,
                 'recording_id': recording.id,
@@ -3499,7 +3374,7 @@ def chat_with_transcription():
             stream = call_chat_completion(
                 messages=messages,
                 temperature=chat_temperature,
-                max_tokens=int(os.environ.get("CHAT_MAX_TOKENS", "2000")),
+                max_tokens=max_output_tokens("CHAT_MAX_TOKENS"),
                 stream=True,
                 user_id=user_id,
                 operation_type='chat'

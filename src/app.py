@@ -20,10 +20,9 @@ if __name__ == '__main__':
 
 import os
 import sys
-from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, flash, Response, make_response, session
+from flask import Flask, request, jsonify, send_file, redirect, url_for, flash, Response, make_response, session
 from urllib.parse import urlparse, urljoin, quote
 from email.utils import encode_rfc2231
-from markupsafe import Markup
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, timedelta
 from openai import OpenAI # Keep using the OpenAI library
@@ -622,7 +621,6 @@ from src.tasks.processing import (
 )
 
 # Import configuration helpers
-from src.config.version import get_version
 
 # Initialize Flask-Login and other extensions
 login_manager = LoginManager()
@@ -964,168 +962,6 @@ def handle_request_entity_too_large(_error):
     }), 413
 
 
-# Add context processor to make 'now' available to all templates
-@app.context_processor
-def inject_now():
-    return {'now': datetime.now()}
-
-# Expose the app version to templates so the service worker registration URL
-# (and therefore its cache namespace) changes on every release, forcing the
-# browser to install the new worker and refetch the app shell (issue #357).
-_app_version = get_version()
-
-@app.context_processor
-def inject_app_version():
-    return {'app_version': _app_version}
-
-from src.utils.assistant_limits import MAX_QUESTION_CHARS as _max_question_chars
-
-@app.context_processor
-def inject_assistant_limits():
-    """The longest question the chat routes accept, for the composer's maxlength (#634)."""
-    return {'max_question_chars': _max_question_chars}
-
-from src.utils.i18n_bootstrap import i18n_bootstrap as _i18n_bootstrap
-
-@app.context_processor
-def inject_i18n_bootstrap():
-    """Translations embedded in pages that load i18n.js (includes/i18n_bootstrap.html)."""
-    return {'i18n_bootstrap': _i18n_bootstrap}
-
-@app.context_processor
-def inject_account_theme():
-    """The theme saved with the signed-in user's account (D#419), for
-    includes/theme_account.html. None for a visitor who is not signed in.
-
-    theme_defaults is the color scheme and UI theme a page shows when neither
-    the account nor the browser has one saved: for a signed-in account, the
-    meaning of NULL (blue, the default theme); for a visitor, the look for new accounts
-    (src/config/ui_themes.py new_user_theme), so a fresh install's sign-in
-    page looks like a new account."""
-    from flask import has_request_context
-    from flask_login import current_user
-    from src.config import ui_themes
-    if not has_request_context() or not current_user.is_authenticated:
-        return {'account_theme': None,
-                'theme_defaults': {'colorScheme': ui_themes.new_user_color_scheme(),
-                                   'uiTheme': ui_themes.new_user_theme()}}
-    return {'account_theme': {'dark': current_user.theme_dark_mode,
-                              'scheme': current_user.theme_color_scheme,
-                              'ui_theme': current_user.ui_theme},
-            'theme_defaults': {'colorScheme': ui_themes.DEFAULT_COLOR_SCHEME,
-                               'uiTheme': ui_themes.DEFAULT_THEME}}
-
-
-@app.context_processor
-def inject_ui_themes():
-    """UI themes (src/config/ui_themes.py) for includes/ui_theme.html, the
-    theme cards (includes/ui_theme_picker.html) and the template slots
-    (themes/slot.html). Only available themes are listed."""
-    from flask import has_request_context, url_for
-    from flask_login import current_user
-    from src.config import ui_themes
-    from src.utils.localization import translate
-
-    def static_url(path):
-        return url_for('static', filename=path) if has_request_context() else '/static/' + path
-
-    available = ui_themes.available_themes()
-    signed_in = has_request_context() and current_user.is_authenticated
-    return {
-        'ui_theme_assets': {t.id: (static_url(t.stylesheet) if t.stylesheet else '') for t in available},
-        'ui_theme_choices': [{'id': t.id, 'name': translate(t.name_key),
-                              'description': translate(t.description_key),
-                              'preview_url': static_url(t.preview)} for t in available],
-        'ui_theme_labels': {key: translate(f'uiTheme.{key}')
-                            for key in ('title', 'help', 'appearance', 'colorSchemeLink')},
-        'account_ui_theme': ui_themes.resolve_theme(current_user.ui_theme) if signed_in
-                            else ui_themes.DEFAULT_THEME,
-        'ui_theme_slot_overrides': ui_themes.slot_overrides,
-    }
-
-
-@app.context_processor
-def inject_assistant_name():
-    """The assistant's name (src/utils/assistant_name.py) for the templates,
-    and for scripts through includes/i18n_bootstrap.html
-    (window.speakrAssistantName). The default for a visitor."""
-    from flask import has_request_context
-    from flask_login import current_user
-    from src.utils.assistant_name import assistant_name_of, assistant_initial
-    user = current_user if has_request_context() and current_user.is_authenticated else None
-    name = assistant_name_of(user)
-    return {'assistant_name': name, 'assistant_initial': assistant_initial(name)}
-
-
-@app.context_processor
-def inject_inquire_mode_flag():
-    """The shared header shows the Inquire button on every page."""
-    return {'inquire_mode_enabled': ENABLE_INQUIRE_MODE}
-
-
-@app.context_processor
-def inject_help_center_link():
-    """Optional custom help link in the user menu (#371).
-
-    Admins hosting their own FAQ/tutorial page set HELP_CENTER_URL (and
-    optionally HELP_CENTER_LABEL) to surface it prominently for users.
-    """
-    from src.models import SystemSetting
-    return {
-        'help_center_url': (SystemSetting.get_setting('help_center_url', os.environ.get('HELP_CENTER_URL', '')) or '').strip(),
-        'help_center_label': (SystemSetting.get_setting('help_center_label', os.environ.get('HELP_CENTER_LABEL', '')) or '').strip(),
-    }
-
-@app.context_processor
-def inject_registration_flag():
-    """The login page offers the register link only when /register accepts (#479)."""
-    from src.api.auth import registration_enabled
-    return {'registration_enabled': registration_enabled()}
-
-@app.context_processor
-def inject_ui_languages():
-    """The interface languages, for the selects that list them."""
-    from src.utils.localization import UI_LANGUAGES
-    return {'ui_languages': UI_LANGUAGES}
-
-@app.context_processor
-def inject_output_languages():
-    """Shared list of output/translation target language names (#translation)."""
-    from src.utils.language import OUTPUT_LANGUAGES
-    return {'output_languages': OUTPUT_LANGUAGES}
-
-@app.context_processor
-def inject_group_admin_status():
-    """Inject is_group_admin flag and the admin-group list into all templates.
-
-    user_admin_groups feeds the shared tag/folder modals (group assignment
-    dropdown), which render on the account page AND the main app now that
-    tags/folders can be created inline from the upload dialog.
-    """
-    from flask_login import current_user
-    from src.models.organization import GroupMembership
-
-    user_admin_groups = []
-    can_create_groups = False
-    if current_user.is_authenticated:
-        # Users who may create groups reach the group management page (#576)
-        from src.api.groups import can_create_groups as _can_create_groups
-        can_create_groups = _can_create_groups(current_user)
-        memberships = GroupMembership.query.filter_by(
-            user_id=current_user.id,
-            role='admin'
-        ).all()
-        user_admin_groups = [
-            {'id': m.group.id, 'name': m.group.name}
-            for m in memberships if m.group
-        ]
-
-    return {
-        'is_group_admin': bool(user_admin_groups),
-        'user_admin_groups': user_admin_groups,
-        'can_create_groups': can_create_groups,
-    }
-
 # Ensure upload and instance directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -1367,18 +1203,19 @@ def robots_txt():
     """Serve robots.txt to instruct crawlers not to index the site."""
     return send_file(os.path.join(app.static_folder, 'robots.txt'), mimetype='text/plain')
 
-# --- Service worker -----------------------------------------------------------
-@app.route('/sw.js')
+# Old releases registered a worker at this path. Retire it in-place so
+# previously installed browser/WebView clients stop serving the old UI.
+@app.get('/sw.js')
 def service_worker():
-    """Serve static/sw.js from the root, so that its scope is the whole app.
+    return send_file(os.path.join(app.static_folder, 'sw.js'), mimetype='text/javascript', max_age=0)
 
-    A worker's widest scope is the directory of its URL: served from
-    /static/sw.js it controlled no page. No Service-Worker-Allowed header is
-    needed for a file at the root. The browser's update check must see a new
-    release at once, so the file is revalidated on every request.
-    """
-    response = send_file(os.path.join(app.static_folder, 'sw.js'), mimetype='text/javascript', max_age=0)
-    response.headers['Cache-Control'] = 'no-cache'
+
+@app.after_request
+def cache_hashed_meeting_assets(response):
+    if request.endpoint == 'static' and response.status_code in (200, 304):
+        filename = (request.view_args or {}).get('filename', '')
+        if re.fullmatch(r'meeting/assets/[\w-]+-[\w-]{8}\.(?:js|css)', filename):
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
     return response
 
 

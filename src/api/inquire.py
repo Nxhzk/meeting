@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta
 from src.utils.timezones import to_local, user_timezone
 from src.utils.route_errors import internal_error
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, send_file, Response, current_app
+from flask import Blueprint, request, redirect, url_for, flash, jsonify, send_file, Response, current_app
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
 
@@ -25,6 +25,7 @@ from src.utils.speaker_labels import real_speaker_names
 from src.services.assistant_events import FilterError, checked_filters, filters_from_request
 from src.services.embeddings import get_accessible_recording_ids, semantic_search_chunks, EMBEDDINGS_AVAILABLE
 from src.services.llm import call_llm_completion, call_chat_completion, process_streaming_with_thinking, client, chat_client, TokenBudgetExceeded
+from src.services.llm import max_output_tokens
 from src.utils.request_body import json_object_body
 
 # Create blueprint
@@ -32,7 +33,6 @@ inquire_bp = Blueprint('inquire', __name__)
 
 # Configuration from environment
 ENABLE_INQUIRE_MODE = os.environ.get('ENABLE_INQUIRE_MODE', 'false').lower() == 'true'
-USE_ASR_ENDPOINT = os.environ.get('USE_ASR_ENDPOINT', 'false').lower() == 'true'
 
 # Most chunks POST /api/inquire/search returns (#628)
 INQUIRE_SEARCH_MAX_TOP_K = 50
@@ -60,32 +60,8 @@ def init_inquire_helpers(**kwargs):
 @inquire_bp.route('/ask')
 @login_required
 def inquire():
-    """The library page, "Ask Ambrose" (the assistant's name,
-    src/utils/assistant_name.py). /ask is an alias of /inquire."""
-    # Check if inquire mode is enabled
-    if not ENABLE_INQUIRE_MODE:
-        flash(translate('server.flash.inquireDisabled'), 'warning')
-        return redirect(url_for('recordings.index'))
-
-    # Check if user is a group admin
-    is_team_admin = GroupMembership.query.filter_by(
-        user_id=current_user.id,
-        role='admin'
-    ).first() is not None
-
-    # Render the inquire page with user context for theming
-    # The interface language, as on the other pages (it was missing here, so
-    # Inquire always appeared in the browser language).
-    user_language = current_user.ui_language or 'en'
-    from src.utils.assistant_name import assistant_name_of
-    page_title = translate('inquire.title', user_language, name=assistant_name_of(current_user))
-    return render_template('inquire.html',
-                         page_title=page_title,
-                         use_asr_endpoint=USE_ASR_ENDPOINT,
-                         current_user=current_user,
-                         is_team_admin=is_team_admin,
-                         user_language=user_language)
-
+    # Retain the API, not the old standalone assistant workspace.
+    return redirect(url_for('recordings.index'))
 
 
 @inquire_bp.route('/api/inquire/sessions', methods=['GET'])
@@ -317,7 +293,7 @@ Use proper markdown formatting including headings (##), bold (**text**), bullet 
                             {"role": "user", "content": user_message}
                         ],
                         temperature=0.7,
-                        max_tokens=int(os.environ.get("CHAT_MAX_TOKENS", "2000")),
+                        max_tokens=max_output_tokens("CHAT_MAX_TOKENS"),
                         stream=True,
                         user_id=user_id,
                         operation_type='chat'
@@ -639,7 +615,7 @@ Respond with only a JSON array of strings: ["term1", "term2", ...]"""
             
             # Get transcript length limit setting and available speakers
             with app.app_context():
-                transcript_limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+                transcript_limit = SystemSetting.get_setting('transcript_length_limit', -1)
                 
                 # Get all available speakers for this user
                 recordings_with_participants = Recording.query.filter_by(user_id=user_id).filter(
@@ -711,7 +687,7 @@ Order your response with notes from the most recent meetings first. Always use p
             stream = call_chat_completion(
                 messages=messages,
                 temperature=0.7,
-                max_tokens=int(os.environ.get("CHAT_MAX_TOKENS", "2000")),
+                max_tokens=max_output_tokens("CHAT_MAX_TOKENS"),
                 stream=True,
                 user_id=user_id,
                 operation_type='chat'
@@ -777,7 +753,7 @@ Order your response with notes from the most recent meetings first. Always use p
                                         new_stream = call_chat_completion(
                                             messages=updated_messages,
                                             temperature=0.7,
-                                            max_tokens=int(os.environ.get("CHAT_MAX_TOKENS", "2000")),
+                                            max_tokens=max_output_tokens("CHAT_MAX_TOKENS"),
                                             stream=True,
                                             user_id=user_id,
                                             operation_type='chat'

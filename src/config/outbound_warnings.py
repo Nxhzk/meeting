@@ -31,8 +31,6 @@ from urllib.parse import urlparse
 
 # (service as named in the log, environment variable)
 SERVICE_URLS = (
-    ('transcription service', 'ASR_BASE_URL'),
-    ('transcription service', 'TRANSCRIPTION_BASE_URL'),
     ('text model', 'TEXT_MODEL_BASE_URL'),
     ('chat model', 'CHAT_MODEL_BASE_URL'),
     ('translation model', 'TRANSLATION_MODEL_BASE_URL'),

@@ -1033,8 +1033,8 @@ def _run_migrations(app, engine):
         if not SystemSetting.query.filter_by(key='transcript_length_limit').first():
             SystemSetting.set_setting(
                 key='transcript_length_limit',
-                value='30000',
-                description='Maximum number of characters to send from transcript to LLM for summarization and chat. Use -1 for no limit.',
+                value='-1',
+                description='Maximum number of characters to send from transcript to LLM for summarization and chat. -1 means no limit (the model takes a 1,000,000-token context).',
                 setting_type='integer'
             )
             app.logger.info("Initialized default transcript_length_limit setting")

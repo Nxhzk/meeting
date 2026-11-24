@@ -1,0 +1,79 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Release signing comes from keystore.properties (kept out of version control).
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file(providers.gradleProperty('jstSigningProperties').getOrElse('keystore.properties'))
+if (keystoreFile.exists()) keystoreFile.withInputStream { keystoreProps.load(it) }
+
+// The production origin is pinned in the APK. Change only debug builds for ADB testing.
+def production = 'https://jstai.com.cn/jst-meeting/'
+def debugUrl = providers.gradleProperty('jstDebugUrl').getOrElse(production)
+if (!(debugUrl ==~ /(?:https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?|http:\/\/localhost(?::[0-9]+)?)\/(?:[A-Za-z0-9_-]+\/)*/)) {
+    throw new GradleException('jstDebugUrl must be a HTTPS URL or http://localhost, ending in /')
+}
+
+android {
+    namespace 'com.jieshitong.meeting'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.jieshitong.meeting'
+        minSdk 26
+        targetSdk 35
+        versionCode 3
+        versionName '1.2'
+        buildConfigField 'String', 'MEETING_URL', '"' + production + '"'
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreFile.exists()) {
+                storeFile new File(keystoreFile.parentFile, keystoreProps['storeFile'])
+                if (new File(keystoreProps['storeFile']).isAbsolute()) storeFile new File(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+            buildConfigField 'String', 'MEETING_URL', '"' + debugUrl + '"'
+            resValue 'string', 'app_name', '捷士通智能会议（测试）'
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    buildFeatures {
+        viewBinding true
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity-ktx:1.9.3'
+    implementation 'androidx.webkit:webkit:1.12.1'
+    // UI components: dialogs, bottom sheet, cards, buttons.
+    implementation 'com.google.android.material:material:1.12.0'
+    // Runtime and special permissions, with pages for Chinese phone brands.
+    implementation 'com.github.getActivity:XXPermissions:20.0'
+}

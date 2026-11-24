@@ -27,3 +27,8 @@ venv/
 .pytest_cache/
 node_modules/
 .DS_Store
+
+# React build and Android local outputs
+/static/meeting/
+/android/.kotlin/
+*.apk

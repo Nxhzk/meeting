@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the meeting page's theme-color. -->
+    <color name="paper">#F8F7F3</color>
+    <color name="ink">#26231E</color>
+    <color name="ink_muted">#6B665C</color>
+    <color name="brand_blue">#1E4E9C</color>
+    <color name="brand_red">#E5484D</color>
+    <color name="paused_amber">#B7791F</color>
+    <color name="good_green">#2F7D4F</color>
+    <color name="icon_background">#FFFFFF</color>
+</resources>

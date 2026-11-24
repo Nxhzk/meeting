@@ -637,7 +637,7 @@ OPENAPI_SPEC = {
                                 "schema": {
                                     "type": "object",
                                     "properties": {
-                                        "connector": {"type": "string", "nullable": True, "description": "Active connector name (e.g. asr_endpoint, openai_transcribe, mistral, vibevoice)"},
+                                        "connector": {"type": "string", "nullable": True, "description": "Active connector name (aliyun_asr)"},
                                         "capabilities": {
                                             "type": "object",
                                             "description": "Boolean flags indicating which optional fields the connector accepts",
@@ -3063,7 +3063,7 @@ def get_transcription_info():
 
     Response shape:
       {
-        "connector": "openai_transcribe",
+        "connector": "aliyun_asr",
         "capabilities": {
           "diarization": true,
           "speaker_count_control": false,
@@ -3074,25 +3074,24 @@ def get_transcription_info():
           "chunking": false
         },
         "models": [
-          {"value": "gpt-4o-transcribe-diarize", "label": "GPT-4o Diarize"},
+          {"value": "fun-asr", "label": "Fun-ASR"},
           ...
         ],
-        "default_model": "gpt-4o-transcribe-diarize"
+        "default_model": "fun-asr"
       }
     """
     from src.models import SystemSetting
     from src.config.app_config import (
         TRANSCRIPTION_MODEL,
         USE_NEW_TRANSCRIPTION_ARCHITECTURE,
-        USE_ASR_ENDPOINT,
     )
 
     connector_name = None
     capabilities = {
-        'diarization': USE_ASR_ENDPOINT,
-        'speaker_count_control': USE_ASR_ENDPOINT,
-        'hotwords': USE_ASR_ENDPOINT,
-        'initial_prompt': USE_ASR_ENDPOINT,
+        'diarization': False,
+        'speaker_count_control': False,
+        'hotwords': False,
+        'initial_prompt': False,
         'timestamps': True,
         'language_detection': True,
         'chunking': False,

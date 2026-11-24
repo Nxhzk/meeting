@@ -62,7 +62,6 @@ def convert_uploaded_recording(recording_id, params):
     with storage.materialize(old_locator) as materialized:
         local_path = materialized.local_path
         before = os.stat(local_path)
-        use_asr_endpoint = os.environ.get('USE_ASR_ENDPOINT', 'false').lower() == 'true'
         connector_specs = None
         if USE_NEW_TRANSCRIPTION_ARCHITECTURE:
             try:
@@ -73,14 +72,13 @@ def convert_uploaded_recording(recording_id, params):
             except Exception as e:
                 current_app.logger.warning(f"Could not get connector specs for conversion: {e}")
         needs_chunking = bool(
-            chunking_service and chunking_service.needs_chunking(local_path, use_asr_endpoint, connector_specs)
+            chunking_service and chunking_service.needs_chunking(local_path, connector_specs=connector_specs)
         )
         try:
             result = convert_if_needed(
                 local_path,
                 original_filename=original_filename,
                 needs_chunking=needs_chunking,
-                is_asr_endpoint=use_asr_endpoint,
                 delete_original=False,
                 connector_specs=connector_specs,
             )

@@ -1,19 +1,16 @@
 """Saved provider tasks for submit-and-poll transcription services.
 
-AssemblyAI and Tencent accept a job, return a task ID and are then polled, and
-they charge for each job. The task is saved on the running ProcessingJob as
+Alibaba Cloud accepts a job, returns a task ID and is then polled, and it charges
+for each job. The task is saved on the running ProcessingJob as
 soon as the service accepts it, so a retry of that job (after a polling
 timeout, an error or a restart) polls the same task instead of submitting and
 paying again. A new job, such as a reprocess the user starts, has no saved task
 and always submits. A saved task is used only for the same service and the
 same audio bytes.
 
-The WhisperX ASR service's asynchronous jobs (asr_endpoint) are saved the
-same way, so a restart of Speakr resumes polling the remote job instead of
-running the audio through the GPU again. A remote job saved on a processing
-job is cancelled when that job or its recording is deleted
-(cancel_remote_tasks), and removed when the processing job ends for good
-(release_remote_task).
+Alibaba Cloud has no call that cancels or removes a task, so there is nothing to
+cancel when a processing job or its recording is deleted: cancel_remote_tasks
+and release_remote_task remain only because those paths call them.
 """
 
 import hashlib
@@ -118,50 +115,19 @@ def provider_task_for(recording_id, provider, audio_path):
 
 
 def cancel_remote_tasks(jobs):
-    """Cancel the WhisperX ASR jobs saved on these processing jobs.
+    """Cancel the provider tasks saved on these processing jobs.
 
-    Called before processing jobs or their recording are deleted, so the
-    service stops the run and drops the transcript. Best effort: a service
-    that cannot be reached keeps the job until its result expires.
-
-    Returns the ids of the processing jobs whose ASR job the service
-    confirmed as removed.
+    Aliyun ASR offers no way to cancel a task (it finishes and expires after
+    24 hours), so nothing is cancelled. Returns the ids of the processing jobs
+    whose remote task was confirmed removed: always none.
     """
-    removed = []
-    for job in jobs:
-        try:
-            stored = json.loads(job.provider_task) if job.provider_task else None
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(stored, dict) or stored.get('provider') != 'asr_endpoint':
-            continue
-        task = stored.get('task')
-        if not isinstance(task, dict) or not task.get('job_id') or not task.get('base_url'):
-            continue
-        try:
-            from src.services.transcription.connectors.asr_endpoint import cancel_remote_job
-            if cancel_remote_job(task['base_url'], task['job_id']) is True:
-                removed.append(job.id)
-        except Exception as e:
-            logger.warning(f"Could not cancel ASR job {task.get('job_id')} of processing job {job.id}: {e}")
-    return removed
+    return []
 
 
 def release_remote_task(job):
-    """Remove the WhisperX ASR job saved on a processing job that will not poll it again.
+    """Remove the provider task saved on a processing job that ends for good.
 
-    For a processing job that has ended for good: failed without a retry
-    left, dropped because its recording was deleted, cancelled, or completed
-    by another path. The saved task is cleared once the service confirms the
-    job is gone; otherwise it stays, so a later retry, delete or cleanup of
-    the processing job tries again. Tasks of other providers are left alone.
+    Aliyun tasks cannot be removed, so the saved task stays on the job.
     Never raises and does not commit. Returns whether the task was cleared.
     """
-    try:
-        if not job.provider_task or job.id not in cancel_remote_tasks([job]):
-            return False
-        job.provider_task = None
-        return True
-    except Exception as e:
-        logger.warning(f"Could not remove the ASR job of processing job {getattr(job, 'id', None)}: {e}")
-        return False
+    return False

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f8f7f3">
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+    <title>{{ title|default('捷士通智能会议') }}</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='img/jst/mark.png') }}">
+    {% for stylesheet in styles|default([]) %}
+    <link rel="stylesheet" href="{{ stylesheet }}">
+    {% endfor %}
+    {% if script %}
+    <script type="module" src="{{ script }}"></script>
+    {% endif %}
+</head>
+<body>
+    {% if unavailable %}
+    <main><h1>会议页面暂不可用</h1><p>前端资源尚未部署，请稍后重试。</p></main>
+    {% else %}
+    <div id="root"></div>
+    <script id="meeting-bootstrap" type="application/json">{{ bootstrap|tojson }}</script>
+    <noscript>请开启 JavaScript 后使用捷士通智能会议。</noscript>
+    {% endif %}
+</body>
+</html>

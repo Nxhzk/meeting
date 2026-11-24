@@ -16,22 +16,11 @@ from src.utils.localization import format_number, format_percent, translate
 logger = logging.getLogger(__name__)
 
 
-# Pricing configuration per connector/model (dollars per minute)
+# Pricing configuration per connector/model. Alibaba Cloud bills the cloud account
+# directly, so the app's own cost estimate stays 0.
 TRANSCRIPTION_PRICING = {
-    'openai_whisper': {
-        'whisper-1': 0.006,  # $0.006/min
-        'default': 0.006,
-    },
-    'openai_transcribe': {
-        'gpt-transcribe': 0.0045,        # $0.0045/min
-        'gpt-4o-transcribe': 0.006,      # $0.006/min
-        'gpt-4o-mini-transcribe': 0.003,  # $0.003/min
-        'gpt-4o-mini-transcribe-2025-12-15': 0.003,
-        'gpt-4o-transcribe-diarize': 0.006,
-        'default': 0.006,
-    },
-    'asr_endpoint': {
-        'default': 0.0,  # Self-hosted = free
+    'aliyun_asr': {
+        'default': 0.0,
     },
 }
 
@@ -60,9 +49,7 @@ class TranscriptionTracker:
     """Service for recording and checking transcription usage."""
 
     CONNECTOR_TYPES = [
-        'openai_whisper',
-        'openai_transcribe',
-        'asr_endpoint',
+        'aliyun_asr',
     ]
 
     def record_usage(
@@ -78,7 +65,7 @@ class TranscriptionTracker:
 
         Args:
             user_id: User ID who made the request
-            connector_type: Type of connector (openai_whisper, openai_transcribe, asr_endpoint)
+            connector_type: Type of connector (aliyun_asr)
             audio_duration_seconds: Duration of audio transcribed in seconds
             model_name: Name of the model used
             estimated_cost: Pre-calculated cost (if None, calculated from pricing config)

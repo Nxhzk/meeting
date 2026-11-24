@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 
 import bleach
-from flask import Blueprint, current_app, jsonify, make_response, render_template, request, url_for
+from flask import Blueprint, current_app, jsonify, request, url_for
 from flask_login import current_user, login_required
 from sqlalchemy.orm import load_only
 
@@ -12,7 +12,7 @@ from src.database import db
 from src.models import Recording, RecordingSession
 from src.models.processing_job import ProcessingJob
 from src.models.recording_session import RECORDING_SESSION_ENDED
-from src.services.transcription.connectors.alibaba_funasr import PENDING_SETUP
+from src.services.transcription.connectors.aliyun_asr import PENDING_SETUP
 from src.services import audit
 from src.services.recording_deletion import delete_recording_completely, cleanup_orphaned_speakers_quietly
 from src.services.llm import TEXT_MODEL_CONFIGURED
@@ -37,13 +37,14 @@ DOCUMENT_TAGS = {
 }
 
 
-def home():
-    response = make_response(render_template(
-        'meetings.html', transcription_pending=bool(current_app.config.get('TRANSCRIPTION_SETUP_PENDING')),
-        summary_ready=TEXT_MODEL_CONFIGURED,
-    ))
-    response.headers['Cache-Control'] = 'no-store'
-    return response
+def home(recording_id=None):
+    from src.meeting_web import render_page
+    return render_page(
+        'meetings', owner=current_user.id, recordingId=recording_id,
+        transcriptionPending=bool(current_app.config.get('TRANSCRIPTION_SETUP_PENDING')),
+        summaryReady=TEXT_MODEL_CONFIGURED, logoutUrl=url_for('auth.logout'),
+        accountUrl=url_for('auth.account'),
+    )
 
 
 def _json(data, status=200):
@@ -105,8 +106,12 @@ def _speaker(label, anonymous):
     return '' if label.lower() in ('unknown', 'speaker', '未知', 'unknown speaker') else label[:128]
 
 
-def _transcript(recording):
-    text = (recording.transcription or '').strip()
+def document_html(text):
+    return bleach.clean(md_to_html(text), tags=DOCUMENT_TAGS, attributes={}, strip=True) if text else ''
+
+
+def transcript_rows(transcription):
+    text = (transcription or '').strip()
     if not text or is_transcription_error(text):
         return []
     segments = parse_segments(text)
@@ -176,7 +181,7 @@ def meeting_detail(recording_id):
     if phase in ACTIVE.values():
         return _json(result)
 
-    transcript = _transcript(recording)
+    transcript = transcript_rows(recording.transcription)
     retry = None
     if TEXT_MODEL_CONFIGURED and transcript and phase in ('failed', 'no_minutes'):
         retry = 'summary'
@@ -184,8 +189,7 @@ def meeting_detail(recording_id):
           and recording.audio_path and not recording.audio_deleted_at):
         retry = 'transcription'
     result.update(
-        summary_html=(bleach.clean(md_to_html(recording.summary), tags=DOCUMENT_TAGS,
-                                  attributes={}, strip=True) if phase == 'ready' else ''),
+        summary_html=document_html(recording.summary) if phase == 'ready' else '',
         transcript=transcript,
         retry=retry,
         duration=recording.get_audio_duration(allow_probe_fallback=False),

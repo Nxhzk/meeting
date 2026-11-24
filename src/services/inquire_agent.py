@@ -36,6 +36,7 @@ from src.models import Folder, Recording, RecordingTag, Tag, User
 from src.utils.search import LIKE_ESCAPE, contains_pattern
 from src.services.embeddings import get_accessible_recording_ids
 from src.services.llm import call_chat_completion, TokenBudgetExceeded, get_chat_config
+from src.services.llm import max_output_tokens
 from src.utils.localization import translate
 from src.utils.error_text import log_failure, user_error_text
 from src.services.assistant_present import (step_label, step_result, summary_label, summary_line,
@@ -474,11 +475,11 @@ def run_inquire_agent(app, user_id, user_ctx, user_message, message_history,
                     stream = llm_call(messages=messages,
                                       tools=schemas if use_tools else None,
                                       temperature=0.4, stream=True,
-                                      max_tokens=int(os.environ.get('CHAT_MAX_TOKENS', '2000')),
+                                      max_tokens=max_output_tokens("CHAT_MAX_TOKENS"),
                                       user_id=user_id, operation_type=operation_type)
                 else:
                     response = llm_call(messages=messages, temperature=0.4,
-                                        max_tokens=int(os.environ.get('CHAT_MAX_TOKENS', '2000')),
+                                        max_tokens=max_output_tokens("CHAT_MAX_TOKENS"),
                                         user_id=user_id, operation_type=operation_type)
             except TokenBudgetExceeded:
                 raise

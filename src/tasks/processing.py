@@ -24,6 +24,7 @@ from src.services.llm_settings import get_temperature
 from src.database import db
 from src.models import Recording, Tag, Event, TranscriptChunk, SystemSetting, GroupMembership, RecordingTag, InternalShare, SharedRecordingState, User, NamingTemplate
 from src.services.llm import is_using_openai_api, call_llm_completion, format_api_error_message, TEXT_MODEL_NAME, client, http_client_no_proxy, TokenBudgetExceeded
+from src.services.llm import max_output_tokens
 from src.utils import extract_json_object, safe_json_loads
 from src.utils.ffprobe import get_codec_info, is_video_file, is_lossless_audio, FFProbeError, has_audio_stream, probe_rejected_input
 from src.utils.ffmpeg_utils import convert_to_mp3, extract_audio_from_video as ffmpeg_extract_audio, compress_audio, FFmpegError, FFmpegNotFoundError, FFmpegTimeoutError, AUDIO_DECODE_FAILED_MESSAGE
@@ -47,10 +48,7 @@ from src.transcription_prompts import (
     clean_llm_response,
     format_transcription_for_llm,
 )
-from src.config.app_config import (
-    ASR_DIARIZE, ASR_BASE_URL, ASR_RETURN_SPEAKER_EMBEDDINGS,
-    transcription_api_key, transcription_base_url, chunking_service, ENABLE_CHUNKING,
-)
+from src.config.app_config import chunking_service, ENABLE_CHUNKING
 from src.file_exporter import export_recording, ENABLE_AUTO_EXPORT
 from src.services.transcription_tracking import transcription_tracker
 from src.utils.log_filters import loggable_error, loggable_locator, loggable_path
@@ -160,12 +158,10 @@ def apply_team_tag_auto_shares(recording_id):
 
 
 # Configuration from environment
-# Note: Legacy ASR paths (USE_ASR_ENDPOINT, transcribe_audio_asr, etc.) were removed.
-# All transcription now uses the connector architecture via transcribe_with_connector().
+# All transcription uses the connector architecture via transcribe_with_connector().
 ENABLE_INQUIRE_MODE = os.environ.get('ENABLE_INQUIRE_MODE', 'false').lower() == 'true'
 
-# chunking_service, ENABLE_CHUNKING, transcription_api_key, and transcription_base_url
-# are imported from src.config.app_config
+# chunking_service and ENABLE_CHUNKING are imported from src.config.app_config
 
 # Note: OpenAI clients are created inside each transcription function as needed,
 # not at module level (matching original pre-refactor behavior)
@@ -532,7 +528,7 @@ def _generate_ai_title(recording):
     # Format first, then truncate — slicing the raw JSON can cut a unicode escape
     # mid-sequence, which makes json.loads() fail and leaves the literal `\uXXXX`
     # escapes in the prompt (issue #260).
-    transcript_limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+    transcript_limit = SystemSetting.get_setting('transcript_length_limit', -1)
     # The title normally uses the plain transcript (it has no use for timestamps).
     # BUT when prefix-cache prompts are on, the title and summary calls must share
     # a byte-identical transcript for the KV cache to be reusable — and the summary
@@ -583,7 +579,7 @@ def _generate_ai_title(recording):
             # TITLE_MAX_TOKENS lets reasoning-model users (e.g. Kimi K2) raise
             # the budget so the model has room for hidden thinking tokens
             # before producing the title itself.
-            max_tokens=int(os.environ.get("TITLE_MAX_TOKENS", "5000")),
+            max_tokens=max_output_tokens("TITLE_MAX_TOKENS"),
             user_id=recording.user_id,
             operation_type='title_generation'
         )
@@ -697,7 +693,7 @@ def generate_summary_only_task(app_context, recording_id, custom_prompt_override
         )
 
         # Get configurable transcript length limit
-        transcript_limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+        transcript_limit = SystemSetting.get_setting('transcript_length_limit', -1)
         if transcript_limit == -1:
             transcript_text = formatted_transcription
         else:
@@ -849,7 +845,7 @@ def generate_summary_only_task(app_context, recording_id, custom_prompt_override
                         prefix_cache_optimized, cache_breakpoints)},
                 ],
                 temperature=llm_temperature,
-                max_tokens=int(os.environ.get("SUMMARY_MAX_TOKENS", "3000")),
+                max_tokens=max_output_tokens("SUMMARY_MAX_TOKENS"),
                 user_id=recording.user_id,
                 operation_type='summarization'
             )
@@ -960,7 +956,7 @@ def extract_events_from_transcript(recording_id, transcript_text, summary_text):
             events_source = (f"Transcript Summary:\n{summary_text}\n\n"
                              f"Transcript excerpt (for additional context):\n{transcript_text[:8000]}")
         else:
-            limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+            limit = SystemSetting.get_setting('transcript_length_limit', -1)
             body = transcript_text if limit == -1 else transcript_text[:limit]
             events_source = f"Transcript:\n{body}"
 
@@ -1136,7 +1132,7 @@ You must respond with valid JSON format only."""
             response_format={"type": "json_object"},
             # EVENT_MAX_TOKENS gives reasoning-model users a knob to raise
             # the budget when hidden thinking tokens crowd out the JSON output.
-            max_tokens=int(os.environ.get("EVENT_MAX_TOKENS", "3000")),
+            max_tokens=max_output_tokens("EVENT_MAX_TOKENS"),
             user_id=recording.user_id,
             operation_type='event_extraction'
         )
@@ -2108,14 +2104,13 @@ def transcribe_with_connector(app_context, recording_id, filepath, original_file
                     # Check if chunking will be needed (affects which codecs are supported)
                     needs_chunking_check = (
                         chunking_service and
-                        chunking_service.needs_chunking(actual_filepath, False, connector_specs)
+                        chunking_service.needs_chunking(actual_filepath, connector_specs=connector_specs)
                     )
 
                     conversion_result = convert_if_needed(
                         filepath=actual_filepath,
                         original_filename=actual_filename,
                         needs_chunking=needs_chunking_check,
-                        is_asr_endpoint=False,  # Using connector architecture
                         delete_original=False,  # Keep original, we may need it for retry
                         connector_specs=connector_specs
                     )
@@ -2161,7 +2156,7 @@ def transcribe_with_connector(app_context, recording_id, filepath, original_file
                 current_app.logger.info(_connector_specs_log(connector_specs))
 
                 if chunking_service:
-                    should_chunk = chunking_service.needs_chunking(actual_filepath, False, connector_specs)
+                    should_chunk = chunking_service.needs_chunking(actual_filepath, connector_specs=connector_specs)
                     current_app.logger.info(f"Chunking decision: should_chunk={should_chunk}")
                 else:
                     should_chunk = False
@@ -2209,30 +2204,12 @@ def transcribe_with_connector(app_context, recording_id, filepath, original_file
                             current_app.logger.info(f"Chunked transcription completed: {len(transcription_text)} characters")
                     else:
                         # Build the transcription request for single file
-                        funasr_needs_s3 = bool(
-                            recording
-                            and get_registry().get_active_connector_name() == 'funasr'
-                            and not getattr(connector, 'use_temporary_upload', False)
-                        )
-                        if funasr_needs_s3:
-                            from src.services.transcription.connectors.alibaba_funasr import (
-                                cleanup_funasr_staging,
-                                prepare_funasr_file_url,
-                            )
                         provider_task = save_provider_task = task_key = report_progress = None
                         if getattr(connector, 'SUPPORTS_TASK_RESUME', False) is True and recording:
                             from src.services.transcription.provider_tasks import provider_task_context
                             provider_task, save_provider_task, task_key, report_progress = provider_task_context(
                                 recording.id, connector.PROVIDER_NAME, actual_filepath)
                         with open(actual_filepath, 'rb') as audio_file:
-                            # Legacy FunASR uses S3. The temporary-upload mode instead
-                            # sends this exact (possibly converted) audio stream.
-                            extra_options = {}
-                            if funasr_needs_s3:
-                                success, urls = prepare_funasr_file_url(recording)
-                                if success and urls:
-                                    extra_options['funasr_file_urls'] = urls
-
                             request = TranscriptionRequest(
                                 audio_file=audio_file,
                                 filename=actual_filename,
@@ -2244,7 +2221,6 @@ def transcribe_with_connector(app_context, recording_id, filepath, original_file
                                 prompt=initial_prompt,
                                 hotwords=hotwords,
                                 model=transcription_model,
-                                extra_options=extra_options,
                                 provider_task=provider_task,
                                 save_provider_task=save_provider_task,
                                 task_key=task_key,
@@ -2259,14 +2235,7 @@ def transcribe_with_connector(app_context, recording_id, filepath, original_file
                                 language,
                             )
                             _end_transaction_before_external_call(recording)
-                            try:
-                                response = connector.transcribe(request)
-                            finally:
-                                # FunASR staging objects are only needed while
-                                # the async task can reach them; delete them as
-                                # soon as the run finishes, success or failure.
-                                if funasr_needs_s3:
-                                    cleanup_funasr_staging(recording)
+                            response = connector.transcribe(request)
 
                         # A safe point: the result is dropped, nothing of it is stored.
                         job.check_cancel()
@@ -2358,7 +2327,7 @@ def transcribe_with_connector(app_context, recording_id, filepath, original_file
                                 # Recalculate if chunking is needed after conversion
                                 should_chunk = (
                                     chunking_service and
-                                    chunking_service.needs_chunking(actual_filepath, False, connector_specs)
+                                    chunking_service.needs_chunking(actual_filepath, connector_specs=connector_specs)
                                 )
                                 continue  # Retry with converted file
                             except (FFmpegError, FFmpegNotFoundError) as conv_error:
@@ -2844,14 +2813,13 @@ def transcribe_incognito(filepath, original_filename, language=None, min_speaker
             try:
                 needs_chunking_check = (
                     chunking_service and
-                    chunking_service.needs_chunking(actual_filepath, False, connector_specs)
+                    chunking_service.needs_chunking(actual_filepath, connector_specs=connector_specs)
                 )
 
                 conversion_result = convert_if_needed(
                     filepath=actual_filepath,
                     original_filename=actual_filename,
                     needs_chunking=needs_chunking_check,
-                    is_asr_endpoint=False,
                     delete_original=False,
                     connector_specs=connector_specs
                 )
@@ -2911,7 +2879,7 @@ def transcribe_incognito(filepath, original_filename, language=None, min_speaker
             incognito_log.info(f"[Incognito] Video passthrough: chunking skipped (ASR backend handles internally)")
         else:
             should_chunk = (chunking_service and
-                           chunking_service.needs_chunking(actual_filepath, False, connector_specs))
+                           chunking_service.needs_chunking(actual_filepath, connector_specs=connector_specs))
 
         # Same model an upload would get, so a service without its own default
         # model works in incognito mode too (#409).
@@ -3051,7 +3019,7 @@ def _generate_incognito_title(transcription_text, user=None):
         formatted_text = format_transcription_for_llm(transcription_text)
         # Limit text for title generation
         # Same transcript limit as the stored title (admin setting, #412).
-        _limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+        _limit = SystemSetting.get_setting('transcript_length_limit', -1)
         limited_text = formatted_text if _limit == -1 else formatted_text[:_limit]
 
         # Get user language preference
@@ -3077,7 +3045,7 @@ def _generate_incognito_title(transcription_text, user=None):
             temperature=get_temperature('title'),
             # Match the main title-generation path so reasoning-model users
             # have a single knob (TITLE_MAX_TOKENS) that covers both flows.
-            max_tokens=int(os.environ.get("TITLE_MAX_TOKENS", "5000")),
+            max_tokens=max_output_tokens("TITLE_MAX_TOKENS"),
             user_id=getattr(user, 'id', None),
             operation_type='title_generation'
         )
@@ -3107,7 +3075,7 @@ def generate_incognito_summary(transcription_text, user=None):
         formatted_text = format_transcription_for_llm(transcription_text)
 
         # Get configurable transcript length limit
-        transcript_limit = SystemSetting.get_setting('transcript_length_limit', 30000)
+        transcript_limit = SystemSetting.get_setting('transcript_length_limit', -1)
         if transcript_limit == -1:
             transcript_text = formatted_text
         else:
@@ -3144,7 +3112,7 @@ def generate_incognito_summary(transcription_text, user=None):
                 {"role": "user", "content": prompt_text}
             ],
             temperature=get_temperature('summary'),
-            max_tokens=int(os.environ.get("SUMMARY_MAX_TOKENS", "3000")),
+            max_tokens=max_output_tokens("SUMMARY_MAX_TOKENS"),
             user_id=getattr(user, 'id', None),
             operation_type='summarization'
         )

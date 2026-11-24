@@ -116,7 +116,6 @@ def convert_if_needed(
     original_filename: Optional[str] = None,
     codec_info: Optional[Dict[str, Any]] = None,
     needs_chunking: bool = False,
-    is_asr_endpoint: bool = False,
     delete_original: bool = True,
     connector_specs: Optional[Any] = None
 ) -> ConversionResult:
@@ -136,7 +135,6 @@ def convert_if_needed(
         original_filename: Original filename for logging (defaults to basename)
         codec_info: Optional pre-fetched codec info to avoid redundant probe calls
         needs_chunking: Whether chunking will be used (affects supported codecs)
-        is_asr_endpoint: Whether using ASR endpoint (affects AAC handling)
         delete_original: Whether to delete original file after successful conversion
         connector_specs: Optional ConnectorSpecifications with provider-specific codec restrictions
 
@@ -273,9 +271,6 @@ def convert_if_needed(
         # audio players unable to seek. Force conversion to a seekable format.
         needs_conversion = True
         logger.info(f"Converting {loggable_path(filepath)} - WebM container lacks seek support")
-    elif is_asr_endpoint and audio_codec == 'aac':
-        needs_conversion = True
-        logger.info(f"Converting AAC-encoded file for ASR endpoint compatibility")
     elif audio_codec not in supported_codecs:
         needs_conversion = True
         logger.info(f"Converting {loggable_path(filepath)} (codec: {audio_codec}) - unsupported for processing")
