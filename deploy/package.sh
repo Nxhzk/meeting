@@ -1,7 +1,7 @@
 #!/bin/bash
 # 构建前端并打出"只含运行必需文件"的服务器包。在仓库根目录之外的任何位置都能执行。
 # 包里有：后端 src（不含声纹校验样例音频）、templates、静态资源（前端编译产物、多语言文案、图片、sw.js）、
-#         VERSION、requirements.lock。
+#         VERSION、requirements.lock，以及会议助手和小助理的 assistant/（package.json、锁文件、两个扩展、skills；服务器上再 npm ci）。
 # 包里没有：前端源码、测试、deploy、android、node_modules、.git、接口文档页的 swagger 脚本。
 # 用法：bash deploy/package.sh [输出目录，默认 /tmp/jst-release]
 set -euo pipefail
@@ -14,7 +14,8 @@ COPYFILE_DISABLE=1 tar \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' \
   --exclude='static/meeting/.publish-*' \
   --exclude='static/vendor' --exclude='src/assets' \
-  -czf "$OUT/jst-meeting.tar.gz" src templates static VERSION requirements.lock
+  -czf "$OUT/jst-meeting.tar.gz" src templates static VERSION requirements.lock \
+  assistant/package.json assistant/package-lock.json assistant/meeting-tools.ts assistant/companion-tools.ts assistant/skills
 echo "包: $OUT/jst-meeting.tar.gz  ($(du -h "$OUT/jst-meeting.tar.gz" | cut -f1)，$(tar -tzf "$OUT/jst-meeting.tar.gz" | grep -vc '/$') 个文件)"
 shasum -a 256 "$OUT/jst-meeting.tar.gz"
 # 防呆：这些绝不该出现在服务器包里

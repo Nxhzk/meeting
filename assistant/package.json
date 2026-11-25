@@ -1,0 +1,12 @@
+{
+  "name": "jst-meeting-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "会议助手运行环境：pi agent 与 srt 沙箱（版本锁定）",
+  "type": "module",
+  "engines": { "node": ">=20.19.0" },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "0.73.1",
+    "@anthropic-ai/sandbox-runtime": "0.0.83"
+  }
+}

@@ -2,6 +2,8 @@
 <resources>
     <!-- Matches the meeting page's theme-color. -->
     <color name="paper">#F8F7F3</color>
+    <!-- 页面底色（与网页底色变量 bg 一致）：状态栏、手势条区域和 WebView 加载前的底色。 -->
+    <color name="page_bg">#F2F2F7</color>
     <color name="ink">#26231E</color>
     <color name="ink_muted">#6B665C</color>
     <color name="brand_blue">#1E4E9C</color>

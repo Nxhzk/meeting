@@ -23,8 +23,8 @@ android {
         applicationId 'com.jieshitong.meeting'
         minSdk 26
         targetSdk 35
-        versionCode 3
-        versionName '1.2'
+        versionCode 4
+        versionName '1.3'
         buildConfigField 'String', 'MEETING_URL', '"' + production + '"'
     }
 
@@ -72,8 +72,12 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.activity:activity-ktx:1.9.3'
     implementation 'androidx.webkit:webkit:1.12.1'
+    // 小助理：后台定时拉取主动消息并弹通知
+    implementation 'androidx.work:work-runtime-ktx:2.10.0'
     // UI components: dialogs, bottom sheet, cards, buttons.
     implementation 'com.google.android.material:material:1.12.0'
     // Runtime and special permissions, with pages for Chinese phone brands.
     implementation 'com.github.getActivity:XXPermissions:20.0'
+    // 纯逻辑的单元测试（电脑上直接跑：./gradlew testDebugUnitTest）
+    testImplementation 'junit:junit:4.13.2'
 }

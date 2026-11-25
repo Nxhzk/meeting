@@ -345,6 +345,10 @@ def _run_migrations(app, engine):
         add_column('user', 'output_language', 'VARCHAR(50)')
         # Per-user timezone for generated text (#412)
         add_column('user', 'timezone', 'VARCHAR(64)')
+        # 长期记忆：始终记住、使用情况（挑选放进上下文的记忆、记忆整理时用）
+        add_column('memory_entry', 'pinned', 'BOOLEAN NOT NULL DEFAULT 0')
+        add_column('memory_entry', 'last_used_at', 'DATETIME')
+        add_column('memory_entry', 'use_count', 'INTEGER NOT NULL DEFAULT 0')
         add_column('user', 'timezone_mode', "VARCHAR(8) DEFAULT 'auto'")
         add_column('user', 'summary_prompt', 'TEXT')
         add_column('user', 'name', 'VARCHAR(100)')

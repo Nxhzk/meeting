@@ -40,7 +40,7 @@ object MeetingPage {
                 if (p === last) return;
                 last = p;
                 var k = document.getElementById('meeting-clock');
-                try { JstApp.postMessage(p + '|' + (k ? k.textContent : '')); } catch (e) {}
+                try { JstApp.postMessage(p + '|' + (k ? k.textContent : '') + (window.__jstNativeActive ? '|n' : '')); } catch (e) {}
             }
             new MutationObserver(send).observe(c, { attributes: true, attributeFilter: ['data-phase'] });
             send();
@@ -54,6 +54,9 @@ object MeetingPage {
         });
         window.__jstWaiting.observe(root, { childList: true, subtree: true });
     })();"""
+
+    /** 页面加载前注入：这个 App 支持原生录音（协议版本 1）。 */
+    const val NATIVE_FLAG_JS = "window.__jstNativeRecorder = 1;"
 
     const val END_JS = """(function(){
         var c = document.getElementById('meeting-control');

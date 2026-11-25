@@ -2,7 +2,6 @@ import { createRoot } from 'react-dom/client';
 import { AuthPage } from './auth.jsx';
 import { Meetings } from './Meetings.jsx';
 import { MeetingRecord } from './MeetingDetail.jsx';
-import { Header } from './ui.jsx';
 import { initRequests } from './recording/api.js';
 import './meeting.css';
 
@@ -26,6 +25,5 @@ if (navigator.serviceWorker) {
 
 const root = createRoot(document.getElementById('root'));
 root.render(config.page === 'meetings' ? <Meetings config={config} />
-    : config.page === 'share' ? <><Header config={config} /><main className="workspace"><section id="meeting-detail">
-        <MeetingRecord meeting={config.meeting} />
-    </section></main></> : <AuthPage config={config} />);
+    : config.page === 'share' ? <main id="meeting-detail"><MeetingRecord meeting={config.meeting} /></main>
+    : <AuthPage config={config} />);

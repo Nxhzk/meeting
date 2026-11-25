@@ -89,6 +89,11 @@ export class MicrophoneMeter {
         }
     }
 
+    // 安卓 App 原生录音：音量由原生推送过来，不在网页里再开一路麦克风检测。
+    external(level, silenced) {
+        this.display(silenced ? 'muted' : level > 0.04 ? 'sound' : 'quiet', Math.max(0, Math.min(1, level || 0)));
+    }
+
     stop() {
         window.clearInterval(this.timer);
         this.timer = null;

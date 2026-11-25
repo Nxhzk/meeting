@@ -211,6 +211,11 @@ def queue_summary_reprocess(recording, user, custom_prompt=None, prompt_mode='re
     from src.services.job_cancel import snapshot_for_reprocess
     restore_state = snapshot_for_reprocess(recording, 'summary')
 
+    # 旧系统的摘要先存成 v1，清空 recording.summary 后也能回看。
+    from src.services.meeting_assistant.service import ensure_legacy_version
+    from src.services.meeting_assistant import trace as tracing
+    ensure_legacy_version(recording)
+    tracing.clear(recording.id)
     recording.summary = None
     recording.clear_summary_prompt_used()
     Event.query.filter_by(recording_id=recording.id).delete()

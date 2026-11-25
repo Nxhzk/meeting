@@ -38,6 +38,7 @@ PASSIVE_PATHS = frozenset({
     '/api/notifications/count',
     '/api/recordings/job-queue-status',
     '/api/csrf-token',
+    '/api/meeting-build',
 })
 
 _https_cookie_warned = False

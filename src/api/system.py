@@ -420,6 +420,14 @@ def get_csrf_token():
         current_app.logger.error(f"Error generating CSRF token: {e}")
         return internal_error(e)
 
+@system_bp.route('/api/meeting-build', methods=['GET'])
+def meeting_build():
+    """当前服务器上的页面版本。页面回到前台时用它判断自己是不是旧版本（不需要登录，只是一个文件名）。"""
+    from src.meeting_web import current_build
+    response = jsonify({'build': current_build()})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
 # --- Flask Routes ---
 
 

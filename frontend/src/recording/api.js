@@ -10,6 +10,9 @@ export function initRequests(config) {
 
 export function currentCsrf() { return token; }
 
+/** 应用挂载前缀下的完整路径（媒体、二进制文件等不走 request() 的地址）。 */
+export function apiUrl(path) { return `${prefix}${path}`; }
+
 export class RequestError extends Error {
     constructor(status, data = null) {
         super(`Meeting request failed (${status})`);

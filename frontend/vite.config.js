@@ -11,6 +11,13 @@ export default defineConfig({
         // Keep previously deployed hashed assets usable by open pages.
         emptyOutDir: false,
         manifest: 'manifest.json',
-        rollupOptions: { input: 'src/main.jsx' },
+        rollupOptions: {
+            input: 'src/main.jsx',
+            // motion 的文件带 "use client"（给服务端渲染用），打包时忽略即可。
+            onwarn(warning, warn) {
+                if (warning.code === 'MODULE_LEVEL_DIRECTIVE') return;
+                warn(warning);
+            },
+        },
     },
 });

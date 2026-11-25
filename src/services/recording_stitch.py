@@ -87,6 +87,9 @@ def _mime_to_extension(mime_type: str) -> str:
         'audio/ogg': 'ogg',
         'audio/mp4': 'm4a',
         'audio/x-m4a': 'm4a',
+        # 安卓 App 原生录音：ADTS 封装的 AAC，每帧自带帧头，分段字节拼接后就是合法音频；
+        # 最后用 ffmpeg 无损封装成 m4a（有时长信息、可拖动）。
+        'audio/aac': 'm4a',
         'audio/mpeg': 'mp3',
         'audio/wav': 'wav',
         'video/webm': 'webm',

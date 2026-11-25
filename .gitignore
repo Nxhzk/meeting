@@ -32,3 +32,6 @@ node_modules/
 /static/meeting/
 /android/.kotlin/
 *.apk
+
+# 本地测试数据
+/data-local/

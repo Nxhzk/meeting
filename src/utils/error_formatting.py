@@ -70,6 +70,7 @@ ERROR_PATTERNS = [
             r'\bno_speech\b',
             r'no (?:recognized |recognised |usable )?speech (?:was )?detected',
             r'asr_response_have_no_words',
+            r'success_with_no_valid_fragment',
         ],
         'title': 'No speech detected',
         'message': 'No recognizable speech was found in this recording.',

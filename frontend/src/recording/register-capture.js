@@ -1,4 +1,4 @@
-import { request } from './api.js';
+import { apiUrl, currentCsrf, request } from './api.js';
 import { clearChunks, dropChunk, readChunks, stageChunk } from './spool.js';
 
 const BASE = '/upload/session';
@@ -11,6 +11,10 @@ const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opu
 // before the meeting waits for a tap on 「继续录音」.
 const AUTO_RESUME_TRIES = 3;
 const AUTO_RESUME_DELAY_MS = 600;
+// 安卓 App 的原生录音：ADTS 封装的 AAC，服务器按字节拼接后封装成 m4a。
+const NATIVE_MIME = 'audio/aac';
+const NATIVE_WATCH_MS = 8000;            // 录音期间多久向原生问一次状态
+const NATIVE_START_TIMEOUT_MS = 45000;   // 含第一次弹出的麦克风权限对话框
 const sessionPath = (id) => `${BASE}/${encodeURIComponent(id)}`;
 const gapText = (ms) => {
     const seconds = Math.max(1, Math.round(ms / 1000));
@@ -31,6 +35,17 @@ export class MeetingCapture {
         this.release = null;
         this.pausedAt = null;
         this.autoResumeTries = 0;
+        // 安卓 App 里：录音、切片、上传都由原生服务完成（界面被划掉、网页崩溃也不影响）；
+        // 其余环境（浏览器、旧版 App）仍然用网页录音。
+        this.native = Boolean(window.__jstNativeRecorder && window.JstApp?.postMessage);
+        this.nativeWaiters = new Set();
+        this.nativeDone = new Set();
+        this.nativeNotice = '';
+        this.nativeSilenced = false;
+        if (this.native) {
+            this.nativeHandler = (status) => this.onNative(status);
+            window.__jstRecorder = this.nativeHandler;
+        }
         this.events = new AbortController();
         const events = { signal: this.events.signal };
         window.addEventListener('online', () => {
@@ -38,6 +53,12 @@ export class MeetingCapture {
             if (this.session && ['recording', 'paused', 'saving', 'retry'].includes(this.mode)) this.resume();
         }, events);
         const returned = () => {
+            if (this.isNativeSession() && !document.hidden && ['recording', 'paused', 'saving'].includes(this.mode)) {
+                // 回到前台：把最新的登录凭证交给原生上传，并要一次最新状态
+                this.nativeSend({ cmd: 'rec.auth', csrf: currentCsrf() });
+                this.nativeSend({ cmd: 'rec.status' });
+                this.autoResumeNative();
+            }
             if (document.hidden || !['recording','paused'].includes(this.mode) || this.checkDeadline()) return;
             if (this.mode === 'paused') return this.autoResume();
             this.keepScreenOn();
@@ -62,6 +83,10 @@ export class MeetingCapture {
 
     detach() {
         this.events.abort();
+        if (this.native && window.__jstRecorder === this.nativeHandler) window.__jstRecorder = null;
+        clearTimeout(this.nativeStartTimer);
+        clearTimeout(this.nativeResumeTimer);
+        this.stopNativeWatch();
         window.removeEventListener('beforeunload', this.beforeUnload);
         this.update = this.notice = this.complete = () => {};
         this.meter?.stop();
@@ -69,11 +94,21 @@ export class MeetingCapture {
         // the UI here; page navigation retains the existing recovery pointer.
     }
 
+    // 这场会议是不是原生录音的：看会议自己的格式。旧版（网页）开始的会议仍按网页的流程收尾。
+    isNativeSession() {
+        return this.native && this.session?.mime === NATIVE_MIME;
+    }
+
+    setNativeActive(on) {
+        window.__jstNativeActive = on ? 1 : 0;   // 让安卓壳知道：页面阶段变化不必再通知旧的网页录音服务
+    }
+
     show(mode) {
         const wasBusy = ['opening', 'recording', 'paused', 'saving'].includes(this.mode);
         const isBusy = ['opening', 'recording', 'paused', 'saving'].includes(mode);
         if (wasBusy && !isBusy) window.removeEventListener('beforeunload', this.beforeUnload);
-        if (!wasBusy && isBusy) window.addEventListener('beforeunload', this.beforeUnload);
+        // 网页录音时，关掉页面就会丢录音，所以拦一下；原生录音（安卓 App）在服务里，页面重载、重建都不影响
+        if (!wasBusy && isBusy && !this.native) window.addEventListener('beforeunload', this.beforeUnload);
         this.mode = mode;
         if (mode === 'recording') this.keepScreenOn();
         else if (this.screenLock) {
@@ -81,8 +116,8 @@ export class MeetingCapture {
             this.screenLock = null;
         }
         this.update(mode, this.session?.startedAt);
-        if (mode === 'recording') this.meter?.start(this.stream);
-        else if (mode !== 'opening') this.meter?.stop();
+        if (mode === 'recording' && !this.native) this.meter?.start(this.stream);
+        else if (mode !== 'recording' && mode !== 'opening') this.meter?.stop();
     }
 
     async keepScreenOn() {
@@ -160,6 +195,15 @@ export class MeetingCapture {
     }
 
     async start({ automatic = false } = {}) {
+        if (this.native) {
+            if (this.mode === 'paused' && this.session && this.session.mime !== NATIVE_MIME) {
+                // 旧版（网页）录音开始的会议：原生录音接不上它（容器格式不同），保存已录下的部分
+                this.notice('这场会议是用旧版录音开始的，不能接着录，已为你保存录下的部分。', 'warn');
+                this.session.interrupted = true;
+                return this.stop({ interrupted: true });
+            }
+            return this.startNative({ automatic });
+        }
         if (!automatic) this.notice('');
         if (!window.isSecureContext) {
             this.notice('这个地址不能打开麦克风。请使用本机地址或受信任的 HTTPS 地址。', 'error');
@@ -279,6 +323,189 @@ export class MeetingCapture {
         }
     }
 
+    // ------------------------------------------------------------ 原生录音（安卓 App）
+    nativeSend(command) {
+        try { window.JstApp.postMessage(JSON.stringify(command)); } catch { /* 桥接不可用时什么也不做 */ }
+    }
+
+    // 录音服务被系统重启后（后台不能重新打开麦克风），人正看着 App 时自动接着录，不用再点一下。
+    autoResumeNative() {
+        if (!this.isNativeSession() || this.mode !== 'paused' || document.hidden || this.session?.ended) return;
+        if (this.nativePauseReason !== 'restart' || this.nativeResumeTimer) return;
+        this.nativeResumeTimer = setTimeout(() => {
+            this.nativeResumeTimer = null;
+            if (this.mode === 'paused' && !document.hidden && this.nativePauseReason === 'restart') {
+                this.nativeSend({ cmd: 'rec.resume', csrf: currentCsrf() });
+            }
+        }, 600);
+    }
+
+    // 录音进程可能被系统悄悄杀掉，它就没法再汇报了：页面定期问一次，没有回应时由安卓壳把服务重新拉起来。
+    startNativeWatch() {
+        if (this.nativeWatch) return;
+        this.nativeWatch = setInterval(() => {
+            if (!this.isNativeSession() || !['recording', 'paused', 'saving'].includes(this.mode)) return this.stopNativeWatch();
+            this.nativeSend({ cmd: 'rec.status' });
+        }, NATIVE_WATCH_MS);
+    }
+
+    stopNativeWatch() {
+        clearInterval(this.nativeWatch);
+        this.nativeWatch = null;
+    }
+
+    // 向原生录音器要一次状态；最多等约 2 秒，没有回应按「没有进行中的会议」处理。
+    askNative() {
+        return new Promise((resolve) => {
+            let tries = 0;
+            let timer = null;
+            const done = (status) => {
+                clearInterval(timer);
+                this.nativeWaiters.delete(done);
+                resolve(status);
+            };
+            this.nativeWaiters.add(done);
+            const ping = () => {
+                if (++tries > 4) return done(null);
+                this.nativeSend({ cmd: 'rec.status' });
+            };
+            timer = setInterval(ping, 600);
+            ping();
+        });
+    }
+
+    async startNative({ automatic = false } = {}) {
+        if (!automatic) this.notice('');
+        const resuming = this.mode === 'paused' && this.session;
+        this.show('opening');
+        try {
+            if (!await this.lock()) return this.show('other');
+            if (!resuming && this.pointer()) return this.restore(false);
+            const opened = resuming ? await request(sessionPath(this.session.id))
+                : await request(BASE, { method: 'POST', json: { mime_type: NATIVE_MIME, meeting_mode: true } });
+            if (!SESSION_ID.test(opened.session_id)) throw new Error('Invalid recording session');
+            if (resuming && (opened.status !== 'recording' || opened.end_requested || opened.meeting_remaining_ms <= 0)) {
+                if (opened.status === 'recording') { this.show('paused'); this.stop({ automatic: opened.meeting_remaining_ms <= 0 }); }
+                else this.finish(opened.finalized_recording_id || null, '这场会议已经结束。');
+                return;
+            }
+            const budget = Number.isFinite(opened.meeting_remaining_ms)
+                ? Math.min(MAX_MEETING_MS, Math.max(0, opened.meeting_remaining_ms)) : MAX_MEETING_MS;
+            const startedAt = resuming ? this.session.startedAt : Date.now();
+            this.session = { ...(resuming ? this.session : {}), id: opened.session_id, startedAt, endsAt: Date.now() + budget,
+                mime: NATIVE_MIME, ended: false, interrupted: Boolean(resuming) };
+            this.monotonicEnd = performance.now() + budget;
+            this.savePointer();
+            if (!resuming) { this.sequence = 0; this.queue = []; }
+            this.setNativeActive(true);
+            this.startNativeWatch();
+            this.nativeStarting = { resuming: Boolean(resuming) };
+            clearTimeout(this.nativeStartTimer);
+            this.nativeStartTimer = setTimeout(() => this.abortNativeStart('没能开始录音，请再试一次。'), NATIVE_START_TIMEOUT_MS);
+            this.nativeSend({
+                cmd: 'rec.start', session: opened.session_id, base: `${location.origin}${apiUrl('')}/`, csrf: currentCsrf(),
+                startedAt, endsAt: this.session.endsAt, nextIndex: (opened.chunk_count || 0) + 1,
+            });
+        } catch (error) {
+            let text = '暂时无法开始会议，请确认网络连接后再试。';
+            if (error.status === 401) text = '登录已失效，请刷新页面重新登录。';
+            else if ([413, 507].includes(error.status)) text = '会议存储空间不足，请联系管理员。';
+            this.abortNativeStart(text, error.status === 401 ? 'error' : 'error');
+        }
+    }
+
+    // 开始失败（没有权限、原生没有回应、服务器出错）：新会议清掉，接着录的会议回到暂停。
+    abortNativeStart(text, tone = 'error') {
+        clearTimeout(this.nativeStartTimer);
+        const starting = this.nativeStarting;
+        this.nativeStarting = null;
+        if (starting?.resuming || (!starting && this.mode === 'paused')) {
+            this.show('paused');
+            this.notice(text, 'warn');
+            this.scheduleDeadline();
+            return;
+        }
+        if (this.session) {
+            const { id } = this.session;
+            request(sessionPath(id), { method: 'DELETE' }).catch(() => {});
+            this.forget(id);
+            this.session = null;
+        }
+        this.setNativeActive(false);
+        this.stopNativeWatch();
+        this.unlock();
+        this.show('idle');
+        this.notice(text, tone);
+    }
+
+    // 原生录音器报告的状态（任何时候都可能到：录音中、通话打断、后台上传、保存完成……）。
+    onNative(status) {
+        if (!status || typeof status !== 'object') return;
+        if (status.type === 'level') {
+            if (this.mode === 'recording') this.meter?.external(status.level, this.nativeSilenced);
+            return;
+        }
+        if (status.type === 'error') {
+            if (status.error === 'permission') this.abortNativeStart('麦克风未获允许。请在系统设置里允许使用麦克风，再点「开始会议」。');
+            return;
+        }
+        if (status.type !== 'status') return;
+        for (const waiter of [...this.nativeWaiters]) waiter(status);
+        if (status.state === 'idle' || !status.session) return;
+        if (this.nativeDone.has(status.session)) return;   // 已经处理过的完成状态
+        // 正在开始新会议时，旧会议的状态不理会
+        if (this.nativeStarting && this.session && status.session !== this.session.id) return;
+        // 页面刷新、被系统重建、从通知栏回来：原生录音器里有会议，页面接上它
+        if (!this.session || this.session.id !== status.session) {
+            if (this.session && ['opening', 'recording', 'paused', 'saving'].includes(this.mode)) return;
+            this.session = { id: status.session, startedAt: status.startedAt, endsAt: status.endsAt, mime: NATIVE_MIME,
+                ended: Boolean(status.ended), interrupted: Boolean(status.interrupted), automatic: Boolean(status.automatic) };
+            this.monotonicEnd = performance.now() + Math.max(0, status.endsAt - Date.now());
+            this.savePointer();
+            this.setNativeActive(true);
+        }
+        const session = this.session;
+        this.startNativeWatch();
+        if (status.interrupted && !session.interrupted) { session.interrupted = true; this.savePointer(); }
+        if (status.automatic && !session.automatic) { session.automatic = true; this.savePointer(); }
+        this.nativeSilenced = Boolean(status.silenced);
+        const text = status.notice || '';
+        if (text !== this.nativeNotice) {
+            this.nativeNotice = text;
+            this.notice(text, 'warn');
+        }
+        switch (status.state) {
+        case 'recording':
+            clearTimeout(this.nativeStartTimer);
+            this.nativeStarting = null;
+            if (this.mode !== 'recording') this.show('recording');
+            if (this.nativeSilenced) this.meter?.external(0, true);
+            this.scheduleDeadline();
+            break;
+        case 'paused':
+            clearTimeout(this.nativeStartTimer);
+            this.nativeStarting = null;
+            this.nativePauseReason = status.pauseReason || '';
+            if (this.mode !== 'paused') this.show('paused');
+            this.autoResumeNative();
+            break;
+        case 'saving':
+            clearTimeout(this.nativeStartTimer);
+            this.nativeStarting = null;
+            session.ended = true;
+            clearTimeout(this.deadlineTimer);
+            if (this.mode !== 'saving') this.show('saving');
+            break;
+        case 'done':
+            this.finish(status.recordingId ?? null);
+            break;
+        case 'failed':
+            this.finish(null, status.failure || '这场会议没有保存下来。');
+            break;
+        default:
+        }
+    }
+
     timeRemaining() {
         return Math.min(this.session.endsAt - Date.now(), this.monotonicEnd - performance.now());
     }
@@ -310,6 +537,7 @@ export class MeetingCapture {
         this.session.automatic = automatic;
         this.savePointer();
         this.show('saving');
+        if (this.isNativeSession()) return this.nativeSend({ cmd: 'rec.stop' });
         if (this.recorder && this.recorder.state !== 'inactive') this.recorder.stop();
         else if (!this.recorder) this.resume(); // A paused meeting has no further stop event.
     }
@@ -351,6 +579,11 @@ export class MeetingCapture {
     }
 
     resume() {
+        if (this.isNativeSession()) {
+            this.nativeSend({ cmd: 'rec.auth', csrf: currentCsrf() });
+            this.nativeSend({ cmd: 'rec.status' });
+            return;
+        }
         clearTimeout(this.timer);
         this.timer = null;
         this.failures = 0;
@@ -359,6 +592,7 @@ export class MeetingCapture {
     }
 
     async pump() {
+        if (this.isNativeSession()) return;   // 原生录音自己上传分段、自己保存会议
         if (this.pumping || this.timer || !this.session) return;
         this.pumping = true;
         const id = this.session.id;
@@ -437,6 +671,18 @@ export class MeetingCapture {
     }
 
     async restore(submit = false) {
+        if (this.native) {
+            if (this.mode === 'restoring') return;
+            if (this.pointer() && this.mode === 'idle') this.show('restoring');
+            const status = await this.askNative();
+            // 原生录音器有会议（录音中、保存中、已完成）：onNative 已经接管，页面状态跟着它走
+            if (status && status.state !== 'idle') return;
+            if (this.mode === 'restoring') this.show('idle');
+        }
+        return this.restoreFromServer(submit);
+    }
+
+    async restoreFromServer(submit = false) {
         // Keep the in-memory queue when this tab already has a pending save.
         if (this.mode === 'retry' && this.session) return this.resume();
         if (this.mode === 'restoring') return;
@@ -519,6 +765,14 @@ export class MeetingCapture {
 
     finish(id, message) {
         const draft = this.session;
+        clearTimeout(this.nativeStartTimer);
+        this.nativeStarting = null;
+        this.stopNativeWatch?.();
+        if (this.native && draft?.mime === NATIVE_MIME) {
+            this.nativeDone.add(draft.id);
+            this.nativeSend({ cmd: 'rec.ack', session: draft.id });
+        }
+        this.setNativeActive(false);
         clearTimeout(this.deadlineTimer);
         clearTimeout(this.autoResumeTimer);
         this.pausedAt = null;

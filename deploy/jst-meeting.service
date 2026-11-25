@@ -9,11 +9,13 @@ User=jst-meeting
 Group=jst-meeting
 WorkingDirectory=/opt/jst-meeting/app
 EnvironmentFile=/etc/jst-meeting/meeting.env
-ExecStart=/opt/jst-meeting/venv/bin/gunicorn --workers 1 --worker-class gthread --threads 8 --bind 127.0.0.1:18899 --timeout 120 --no-control-socket src.app:app
+ExecStart=/opt/jst-meeting/venv/bin/gunicorn --workers 1 --worker-class gthread --threads 16 --bind 127.0.0.1:18899 --timeout 120 --no-control-socket src.app:app
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
-MemoryMax=900M
+# 会议助手和小助理每次运行会起一个 node 子进程（沙箱里的 pi），一起算在这个上限里
+MemoryHigh=900M
+MemoryMax=1100M
 TasksMax=200
 UMask=0077
 NoNewPrivileges=yes
@@ -22,7 +24,8 @@ PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectClock=yes
-ProtectKernelTunables=yes
+# 不设 ProtectKernelTunables：它会在 /proc 上叠只读挂载，沙箱（bubblewrap）就挂不了新的 /proc，
+# 只能退回「能看到宿主 /proc」的弱模式，那样沙箱里能读到本服务的环境变量（密钥）。服务本身无特权，改不了内核参数。
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 ReadWritePaths=/var/lib/jst-meeting

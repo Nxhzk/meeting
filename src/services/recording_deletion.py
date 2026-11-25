@@ -63,6 +63,17 @@ def delete_recording_completely(recording, storage=None, strict_media=False, rea
 
     forget_recording_sessions(recording_id)
 
+    # 会议助手的数据：本场会议的摘要版本和会话随会议删除；长期记忆属于
+    # 用户，留下，只断开来源（SQLite 不执行 ON DELETE）。
+    from src.models import SummaryVersion, AssistantSession, MemoryEntry, MemoryEvent, AssistantTraceEvent
+    AssistantTraceEvent.query.filter_by(recording_id=recording_id).delete(synchronize_session=False)
+    SummaryVersion.query.filter_by(recording_id=recording_id).delete(synchronize_session=False)
+    AssistantSession.query.filter_by(recording_id=recording_id).delete(synchronize_session=False)
+    MemoryEntry.query.filter_by(source_recording_id=recording_id).update(
+        {'source_recording_id': None}, synchronize_session=False)
+    MemoryEvent.query.filter_by(recording_id=recording_id).update(
+        {'recording_id': None, 'summary_version_id': None}, synchronize_session=False)
+
     # A transcription still running on the WhisperX ASR service is cancelled
     # there, and a finished one has its stored transcript removed.
     try:

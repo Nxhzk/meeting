@@ -427,6 +427,19 @@ app = Flask(__name__,
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SQLALCHEMY_DATABASE_URI', 'sqlite:////data/instance/transcriptions.db')
 app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', '/data/uploads')
 
+# 路径里的整数（会议 ID 等）超过数据库能存的范围时当作不存在（404），
+# 不让 SQLite 抛 OverflowError 变成 500。
+from werkzeug.routing import IntegerConverter as _IntegerConverter
+
+
+class _BoundedIntegerConverter(_IntegerConverter):
+    def __init__(self, map, *args, **kwargs):
+        kwargs.setdefault('max', 2 ** 63 - 1)
+        super().__init__(map, *args, **kwargs)
+
+
+app.url_map.converters['int'] = _BoundedIntegerConverter
+
 # Static files ship with no Cache-Control by default, which lets browsers
 # apply heuristic freshness (often days/weeks for rarely-changed files).
 # After an image upgrade that served users a mix of new templates and stale
@@ -950,6 +963,12 @@ def handle_csrf_error(error):
     }), 400
 
 
+@app.errorhandler(OverflowError)
+def handle_number_out_of_range(_error):
+    """查询参数里的数字太大（例如 ?before=99999999999999999999）：参数错误，不是服务器错误。"""
+    return jsonify({'error': '参数超出范围。'}), 400
+
+
 @app.errorhandler(RequestEntityTooLarge)
 def handle_request_entity_too_large(_error):
     """Keep oversized requests JSON-shaped even when parsing fails early."""
@@ -1059,6 +1078,9 @@ from src.api.notifications import notifications_bp
 from src.api.api_v1 import api_v1_bp, init_api_v1_helpers
 from src.api.recording_sessions import recording_sessions_bp
 from src.api.meetings import meetings_bp
+from src.api.meeting_assistant import assistant_bp
+from src.api.companion import companion_bp
+from src.api.companion_internal import companion_internal_bp
 from src.api.webhooks import webhooks_bp
 
 # Database initialization (extracted to src/init_db.py)
@@ -1096,6 +1118,9 @@ app.register_blueprint(tokens_bp)
 app.register_blueprint(shares_bp)
 app.register_blueprint(recordings_bp)
 app.register_blueprint(meetings_bp)
+app.register_blueprint(assistant_bp)
+app.register_blueprint(companion_bp)
+app.register_blueprint(companion_internal_bp)
 app.register_blueprint(tags_bp)
 app.register_blueprint(folders_bp)
 app.register_blueprint(groups_bp)
@@ -1125,6 +1150,7 @@ app.register_blueprint(recording_sessions_bp)
 # X-CSRFToken header for cookie-auth requests.
 app.register_blueprint(webhooks_bp)
 csrf.exempt(webhooks_bp)
+csrf.exempt(companion_internal_bp)  # 本机内部接口：一次性凭证，不走浏览器会话
 
 # PWA Web Share Target (issue #285): the native share sheet cannot round-trip
 # a CSRF token, so the share-target endpoint is exempted. Authentication still

@@ -766,6 +766,7 @@ class FairJobQueue:
             custom_prompt_append=params.get('custom_prompt_append', False),
             user_id=params.get('user_id'),
             prompt_used=params.get('prompt_used'),
+            feedback=params.get('feedback'),
         )
 
     def _run_reprocess_summary(self, job, recording, params, job_type=None):
@@ -780,6 +781,7 @@ class FairJobQueue:
             custom_prompt_append=params.get('custom_prompt_append', False),
             user_id=params.get('user_id'),
             prompt_used=params.get('prompt_used'),
+            feedback=params.get('feedback'),
         )
 
     def _run_stitch(self, job, recording, params, job_type=None):

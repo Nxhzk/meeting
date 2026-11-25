@@ -22,6 +22,7 @@ from openai import OpenAI
 
 from src.services.llm_settings import get_temperature
 from src.database import db
+from src.models import SummaryVersion
 from src.models import Recording, Tag, Event, TranscriptChunk, SystemSetting, GroupMembership, RecordingTag, InternalShare, SharedRecordingState, User, NamingTemplate
 from src.services.llm import is_using_openai_api, call_llm_completion, format_api_error_message, TEXT_MODEL_NAME, client, http_client_no_proxy, TokenBudgetExceeded
 from src.services.llm import max_output_tokens
@@ -624,23 +625,24 @@ def _generate_ai_title(recording):
 
 
 def generate_summary_only_task(app_context, recording_id, custom_prompt_override=None, custom_prompt_append=False,
-                               user_id=None, prompt_used=None):
-    """Generates only a summary for a recording (no title, no JSON response).
+                               user_id=None, prompt_used=None, feedback=None):
+    """生成一场会议的会议摘要：交给会议助手（src/services/meeting_assistant）。
+
+    旧的四层提示词（标签、文件夹、用户、管理员）和提示词拼接已经删除。
+    保留的外围逻辑：SUMMARIZING 状态、原文过短的跳过、录音被删除或被
+    替换的检查、取消、失败状态与报错、完成后的 finish_processing。
 
     Args:
-        app_context: Flask app context
-        recording_id: ID of the recording
-        custom_prompt_override: Optional user-supplied summarization instructions.
-            By default this REPLACES the resolved default prompt (tag/folder/user/admin).
-            When ``custom_prompt_append`` is True, it is appended to the resolved
-            default as additional context instead.
-        custom_prompt_append: When True, append ``custom_prompt_override`` to the
-            resolved default prompt rather than replacing it.
-        user_id: The user who asked for the summary (defaults to the recording owner)
-        prompt_used: {'prompt', 'source', 'name'} to store as the prompt of this
-            summary (reprocessing.summary_prompt_used). Without it the prompt
-            that runs is stored, before the appended text and the variables.
+        feedback: 重新生成时用户的修改意见，可以为空。
+        custom_prompt_override: 旧接口（API v1、批量操作）传来的提示词，
+            按修改意见处理。custom_prompt_append 与 prompt_used 不再使用。
+        user_id: 发起这次生成的用户（默认是会议所有者）。
     """
+    from src.services.error_classification import SummaryStepFailed
+    from src.services.meeting_assistant import runner as assistant_runner
+    from src.services.meeting_assistant import service as assistant
+    from src.services.webhook_dispatch import emit_summary_result
+
     with app_context:
         recording = db.session.get(Recording, recording_id)
         if not recording:
@@ -648,24 +650,10 @@ def generate_summary_only_task(app_context, recording_id, custom_prompt_override
             return
         loaded_created_at = recording.created_at
 
-        if client is None:
-            current_app.logger.warning(f"Skipping summary generation for {recording_id}: OpenRouter client not configured.")
-            recording.summary = "[Summary skipped: OpenRouter client not configured]"
-            recording.clear_summary_prompt_used()
-            db.session.commit()
-            # enqueue set SUMMARIZING; like the other exits, finish_processing
-            # sets COMPLETED and runs the steps that follow it (#412).
-            finish_processing(recording_id)
-            from src.services.webhook_dispatch import emit_summary_result
-            emit_summary_result(db.session.get(Recording, recording_id), ok=False, error="LLM client not configured")
-            return
-
         recording.status = 'SUMMARIZING'
-        summarization_start_time = time.time()
         db.session.commit()
-        job_control.current().stage('summarizing')
-
-        current_app.logger.info(f"Requesting summary from OpenRouter for recording {recording_id} using model {TEXT_MODEL_NAME}...")
+        control = job_control.current()
+        control.stage('summarizing')
 
         if not recording.transcription or len(recording.transcription.strip()) < 10:
             current_app.logger.warning(f"Transcription for recording {recording_id} is too short or empty. Skipping summarization.")
@@ -673,252 +661,62 @@ def generate_summary_only_task(app_context, recording_id, custom_prompt_override
             recording.clear_summary_prompt_used()
             db.session.commit()
             finish_processing(recording_id)
-            from src.services.webhook_dispatch import emit_summary_result
             emit_summary_result(db.session.get(Recording, recording_id), ok=True)
             return
 
-        # Prompt levels come from resolve_summary_instructions (owner's view of
-        # tags, #412). user_id is kept for the job interface and logging.
-        user_output_language = recording.owner.output_language if recording.owner else None
-
-        # Format transcription for LLM (convert JSON to clean text format like clipboard copy).
-        # Optionally include timestamps for the summarizer per the owner's setting (#304).
-        _owner = recording.owner
-        _summary_ts = bool(_owner and _owner.summary_include_timestamps)
-        formatted_transcription = format_transcription_for_llm(
-            recording.transcription,
-            include_timestamps=_summary_ts,
-            template_format=resolve_timestamp_template_format(
-                _owner, _owner.summary_timestamp_template_id) if _summary_ts else None,
-        )
-
-        # Get configurable transcript length limit
-        transcript_limit = SystemSetting.get_setting('transcript_length_limit', -1)
-        if transcript_limit == -1:
-            transcript_text = formatted_transcription
-        else:
-            transcript_text = formatted_transcription[:transcript_limit]
-
-        # Instructions: a replacing override, else the resolved level
-        # (tag > folder > user > admin > default). An appended override is
-        # added below.
-        if custom_prompt_override and not custom_prompt_append:
-            current_app.logger.info(f"Using custom prompt override for recording {recording_id} (length: {len(custom_prompt_override)})")
-            summarization_instructions = custom_prompt_override
-            used_source = ('custom', None)
-            used_prompt_user_id = user_id or recording.user_id
-        else:
-            summarization_instructions, _source, _supplier = resolve_summary_prompt_detail(recording)
-            current_app.logger.info(f"Using {_source} summary prompt for recording {recording_id}")
-            from src.services.summary_prompt import prompt_source
-            used_source = prompt_source(_source, _supplier)[:2]
-            # The owner's prompt, whoever asked (a summary after new speaker
-            # names, for example): it is shown to the owner only.
-            used_prompt_user_id = recording.user_id
-
-        # What is stored with the summary (#584): the prompt in its editable
-        # form, so before the appended text and the variable substitution
-        # below. A request that folded one-run instructions into the override
-        # names the prompt without them in prompt_used; so does a request by
-        # another user than the owner, which runs that user's prompt.
-        if isinstance(prompt_used, dict) and prompt_used.get('prompt'):
-            used_prompt = (prompt_used['prompt'], prompt_used.get('source') or 'custom', prompt_used.get('name'))
-            used_prompt_user_id = user_id or recording.user_id
-        else:
-            used_prompt = (summarization_instructions,) + tuple(used_source)
-
-        # Append the user's per-run additions on top of the resolved default
-        # (issue / discussion #253). This is how a user supplies a meeting agenda
-        # or one-off context without rewriting their saved summary prompt.
-        # The append must happen BEFORE variable substitution so the appended
-        # text's own placeholders get substituted along with the resolved
-        # prompt's placeholders.
-        if custom_prompt_override and custom_prompt_append:
-            current_app.logger.info(
-                f"Appending custom prompt to resolved default for recording {recording_id} "
-                f"(append length: {len(custom_prompt_override)})"
-            )
-            summarization_instructions = (
-                f"{summarization_instructions}\n\n"
-                f"Additional context for this recording:\n{custom_prompt_override}"
-            )
-
-        # Substitute {{variable}} placeholders in the final composed prompt
-        # with the values the user supplied at upload time (or via a later
-        # edit). Running this AFTER the append step lets the appended text
-        # use the same variables as the resolved prompt.
-        from src.utils.prompt_variables import (
-            extract_template_variables,
-            substitute_template_variables,
-        )
-        prompt_variables = recording.prompt_variables or {}
-        used_variables = extract_template_variables(summarization_instructions)
-        if used_variables:
-            missing = [v for v in used_variables if not prompt_variables.get(v)]
-            if missing:
-                current_app.logger.warning(
-                    f"Recording {recording_id} prompt references {len(used_variables)} "
-                    f"variable(s); {len(missing)} have no value: {missing}. "
-                    f"Empty strings will be substituted."
-                )
-            summarization_instructions = substitute_template_variables(
-                summarization_instructions, prompt_variables
-            )
-
-        # Build context information. Dates are in the owner's local time (#412).
-        from src.utils.timezones import now_local, to_local, user_timezone
-        _zone = user_timezone(recording.owner)
-        current_date = now_local(_zone).strftime("%B %d, %Y")
-        context_parts = []
-        context_parts.append(f"Current date: {current_date}")
-
-        # Add recording metadata to context
-        if recording.meeting_date:
-            context_parts.append(f"Recording date: {to_local(recording.meeting_date, _zone).strftime('%B %d, %Y')}")
-        if recording.title:
-            context_parts.append(f"Recording title: {recording.title}")
-
-        # Add folder information if recording is in a folder
-        if recording.folder:
-            context_parts.append(f"Folder: {recording.folder.name}")
-
-        # Add selected tags information (the owner's view of the tags, #412)
-        if recording.owner:
-            visible_tags = recording.get_visible_tags(recording.owner)
-            if visible_tags:
-                tag_names = [tag.name for tag in visible_tags]
-                context_parts.append(f"Tags applied to this transcript by the user: {', '.join(tag_names)}")
-
-        # Add user profile information if available
-        if recording.owner:
-            user_context_parts = []
-            if recording.owner.name:
-                user_context_parts.append(f"Name: {recording.owner.name}")
-            if recording.owner.job_title:
-                user_context_parts.append(f"Job title: {recording.owner.job_title}")
-            if recording.owner.company:
-                user_context_parts.append(f"Company: {recording.owner.company}")
-
-            if user_context_parts:
-                context_parts.append(f"Information about the user: {', '.join(user_context_parts)}")
-
-        context_section = "Context:\n" + "\n".join(f"- {part}" for part in context_parts)
-
-        # The owner's notes on the recording, when they chose to include them
-        # (#440). The notes add context; the transcript stays the source.
-        if recording.owner and recording.owner.summary_include_notes:
-            owner_notes = (recording.get_user_notes(recording.owner) or '').strip()
-            if owner_notes:
-                context_section += (
-                    "\n\nNotes written by the user about this recording (use them as "
-                    "context, for example for names, spellings and background; the "
-                    "transcript remains the record of what was said):\n"
-                    f'"""\n{owner_notes[:SUMMARY_NOTES_LIMIT]}\n"""'
-                )
-
-        prefix_cache_optimized, cache_breakpoints = prefix_cache_flags()
-        system_message_content, prompt_text = build_summary_prompt(
-            transcript_text,
-            context_section,
-            summarization_instructions,
-            user_output_language,
-            prefix_cache_optimized,
-        )
-
-        # Debug logging: Log the complete prompt being sent to the LLM
-        current_app.logger.info(f"Sending summarization prompt to LLM (length: {len(prompt_text)} chars). Set LOG_LEVEL=DEBUG to see full prompt details.")
-        current_app.logger.debug(f"=== SUMMARIZATION DEBUG for recording {recording_id} ===")
-        current_app.logger.debug(f"System message: {system_message_content}")
-        current_app.logger.debug(f"User prompt (length: {len(prompt_text)} chars):\n{prompt_text}")
-        current_app.logger.debug(f"=== END SUMMARIZATION DEBUG for recording {recording_id} ===")
-
-        owner_language = recording.owner.ui_language if recording.owner else None
+        previous = (SummaryVersion.query.filter_by(recording_id=recording_id)
+                    .order_by(SummaryVersion.version.desc()).first())
+        previous_markdown = previous.markdown if previous else assistant.legacy_summary(recording)
+        feedback = feedback or custom_prompt_override
         try:
-            llm_temperature = get_temperature('summary')  # read before the transaction ends
-            job_control.current().check_cancel()  # a safe point before the LLM call
+            control.check_cancel()
             _end_transaction_before_external_call(recording)
-            completion = call_llm_completion(
-                messages=[
-                    {"role": "system", "content": system_message_content},
-                    {"role": "user", "content": build_user_content(
-                        prompt_text, transcript_text,
-                        prefix_cache_optimized, cache_breakpoints)},
-                ],
-                temperature=llm_temperature,
-                max_tokens=max_output_tokens("SUMMARY_MAX_TOKENS"),
-                user_id=recording.user_id,
-                operation_type='summarization'
-            )
-
-            # The recording may be gone, or its id given to a new upload,
-            # by the time the LLM answers (#597).
+            version = assistant.generate(recording_id, user_id=user_id, feedback=feedback,
+                                         report=control.detail, cancel_requested=control.cancel_requested)
             _stop_if_recording_replaced(recording_id, loaded_created_at)
-            job_control.current().check_cancel()  # the reply is dropped
-
-            finish_reason, outcome = _completion_outcome(completion)
-            current_app.logger.info(f"Summary LLM call for recording {recording_id}: {outcome}")
-            raw_response = completion.choices[0].message.content
             current_app.logger.info(
-                f"Raw LLM response for recording {recording_id}: {len(raw_response or '')} characters")
-            current_app.logger.debug(f"Raw LLM response for recording {recording_id}: '{raw_response}'")
-
-            summary = clean_llm_response(raw_response) if raw_response else ""
-            current_app.logger.info(f"Processed summary length for recording {recording_id}: {len(summary)} characters")
-            if not summary or finish_reason == 'length':
-                # An empty reply is a failed summary, not a finished one:
-                # stored as "[Summary not generated]" it left the recording
-                # COMPLETED with nothing to read. A reply cut off at
-                # max_tokens is incomplete and fails the same way.
-                raise _empty_summary_reply(finish_reason, outcome, owner_language,
-                                           truncated=bool(summary))
-
-            recording.summary = summary
-            recording.set_summary_prompt_used(*used_prompt, used_prompt_user_id)
-            db.session.commit()
-            current_app.logger.info(f"Summary generated successfully for recording {recording_id}")
-
-            summarization_end_time = time.time()
-            recording.summarization_duration_seconds = int(summarization_end_time - summarization_start_time)
-            db.session.commit()
-            current_app.logger.info(f"Summarization completed for recording {recording_id} in {recording.summarization_duration_seconds}s.")
-
-            # Events, status, auto-shares, export and Inquire chunks (#305, #412).
-            # The steps after COMPLETED are best-effort inside finish_processing,
-            # so a share/export hiccup cannot reach the except below and
-            # overwrite a good summary with an error.
-            finish_processing(recording_id, events_transcript=formatted_transcription,
-                              events_summary=summary)
-            from src.services.webhook_dispatch import emit_summary_result
+                f"Assistant summary v{version.version} for recording {recording_id} in {version.duration_seconds}s")
+            formatted = format_transcription_for_llm(db.session.get(Recording, recording_id).transcription)
+            finish_processing(recording_id, events_transcript=formatted, events_summary=version.markdown)
             emit_summary_result(db.session.get(Recording, recording_id), ok=True)
-
+        except assistant_runner.AssistantCanceled:
+            db.session.rollback()
+            raise job_control.JobCanceled(control.job_id)
         except RecordingDeletedDuringJob:
-            # Not a summary failure: nothing may be written to this id (#597).
             db.session.rollback()
             current_app.logger.info(f"Recording {recording_id} was deleted during summarization; stopping")
             raise
         except Exception as e:
-            if isinstance(e, EmptySummaryReply):
-                error_msg = f"[Summary generation failed: {e.user_message}]"
-                # Speakr's own diagnosis (finish reason, token counts): no content.
-                current_app.logger.error(f"Error generating summary for recording {recording_id}: {str(e)}")
+            db.session.rollback()
+            if isinstance(e, (assistant.AssistantFailed, assistant_runner.AssistantRunFailed,
+                              assistant_runner.AssistantUnavailable)):
+                reason = str(e)
+                current_app.logger.error(f"Assistant summary failed for recording {recording_id}: {reason}")
             else:
-                # The provider's short message, without what it repeats of
-                # the transcript or the prompt (src/utils/error_text.py).
-                error_msg = format_api_error_message(user_error_text(e, recording))
+                reason = '会议助手出错，请稍后重试。'
                 log_failure(current_app.logger, logging.ERROR,
                             f"Error generating summary for recording {recording_id}", e)
+            if _recording_deleted(recording_id, loaded_created_at):
+                raise RecordingDeletedDuringJob(recording_id)
+            recording = db.session.get(Recording, recording_id)
+            if previous_markdown:
+                # 已有摘要：失败不覆盖它，只记下原因，页面提示「重新生成失败」。
+                assistant.record_failure(recording, reason)
+                recording.summary = previous_markdown
+                recording.status = 'COMPLETED'
+                db.session.commit()
+                emit_summary_result(recording, ok=False, error=reason)
+                return
+            error_msg = f"[Summary generation failed: {reason}]"
             recording.summary = error_msg
             recording.clear_summary_prompt_used()
             recording.status = 'FAILED'
-            recording.error_message = sanitize_error_message(error_msg)
+            recording.error_message = sanitize_error_message(reason)
             db.session.commit()
-            # The caller owns the outcome (#583). The job queue marks the job
-            # failed (or re-queues a transient error) and sends
-            # recording.summary.failed once the failure is final; the
-            # auto-summary inside transcription catches this and keeps the
-            # transcription job completed.
-            from src.services.error_classification import SummaryStepFailed
-            raise SummaryStepFailed(str(e), stored_summary=error_msg) from e
+            failure = SummaryStepFailed(reason, stored_summary=error_msg)
+            # 一次会议助手运行要几分钟，失败后不由队列自动重跑，等用户点重试。
+            failure.permanent = True
+            raise failure from e
 
 
 def extract_events_from_transcript(recording_id, transcript_text, summary_text):

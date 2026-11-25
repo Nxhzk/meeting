@@ -44,6 +44,8 @@ from .upload_join import UploadJoinPart
 from .client_upload import ClientUpload
 from .token_usage import TokenUsage
 from .transcription_usage import TranscriptionUsage
+from .meeting_assistant import SummaryVersion, AssistantSession, MemoryEntry, MemoryEvent, AssistantTraceEvent, MemoryConsolidation
+from .companion import CompanionMessage, CompanionSession, Reminder
 from .webhook import (
     Webhook,
     WebhookDelivery,
@@ -54,6 +56,8 @@ from .webhook import (
 
 # Export all models
 __all__ = [
+    'CompanionMessage', 'CompanionSession', 'Reminder',
+    'SummaryVersion', 'AssistantSession', 'MemoryEntry', 'MemoryEvent', 'AssistantTraceEvent', 'MemoryConsolidation',
     # Database instance
     'db',
     # User models

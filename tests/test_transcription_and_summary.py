@@ -1,4 +1,4 @@
-"""Aliyun ASR connector and the summary request sent to the model gateway.
+"""Aliyun ASR connector and the model gateway settings (the summary itself: test_meeting_assistant).
 
 Both talk to services that are not reachable from a test run, so the HTTP
 layer is replaced: DashScope by an httpx mock transport, the model by a stub.
@@ -183,25 +183,6 @@ class SummaryRequestTest(unittest.TestCase):
         choice = MagicMock(finish_reason='stop')
         choice.message.content = text
         return MagicMock(choices=[choice], usage=None)
-
-    def test_summary_gets_the_whole_transcript_and_the_model_maximum_output(self):
-        from src.tasks import processing
-        from src.models import Recording
-        from src.database import db
-
-        stub = MagicMock(return_value=self.completion('## 会议纪要\n\n- 已讨论完毕'))
-        with patch.object(processing, 'client', object()), patch.object(processing, 'call_llm_completion', stub):
-            processing.generate_summary_only_task(self.app.app_context(), self.recording_id)
-
-        stub.assert_called_once()
-        kwargs = stub.call_args.kwargs
-        self.assertEqual(kwargs['max_tokens'], MODEL_MAX_OUTPUT)
-        self.assertEqual(kwargs['operation_type'], 'summarization')
-        sent = json.dumps(kwargs['messages'], ensure_ascii=False)
-        self.assertGreater(len(sent), 100_000)
-        self.assertIn('尾部标记-散会前的最后一句', sent)
-        with self.app.app_context():
-            self.assertEqual(db.session.get(Recording, self.recording_id).summary, '## 会议纪要\n\n- 已讨论完毕')
 
     def test_model_call_carries_max_thinking_and_the_output_budget(self):
         from src.services import llm

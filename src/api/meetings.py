@@ -28,6 +28,10 @@ ACTIVE = {
     'PROCESSING': 'transcribing', 'SUMMARIZING': 'summarizing',
 }
 SHORT_SUMMARY = '[Summary skipped due to short transcription]'
+# 阿里云转写：录音里没有识别到任何说话内容（静音、噪声、太短）。
+# 阿里云对「没有语音」有两种说法：没识别出任何字；识别通了但没有有效的语音片段（静音、噪音、声音太小）。
+# 都是「这段录音里没人说话」，不是系统出错。
+NO_SPEECH_CODES = ('ASR_RESPONSE_HAVE_NO_WORDS', 'SUCCESS_WITH_NO_VALID_FRAGMENT')
 SUMMARY_SENTINELS = ('[Summary skipped', '[Summary generation failed', '[Summary not generated]')
 # Minutes are a document, not a source of navigation or remotely loaded media.
 DOCUMENT_TAGS = {
@@ -44,6 +48,7 @@ def home(recording_id=None):
         transcriptionPending=bool(current_app.config.get('TRANSCRIPTION_SETUP_PENDING')),
         summaryReady=TEXT_MODEL_CONFIGURED, logoutUrl=url_for('auth.logout'),
         accountUrl=url_for('auth.account'),
+        profile={'username': current_user.username, 'name': current_user.name or '', 'email': current_user.email},
     )
 
 
@@ -60,11 +65,38 @@ def _phase(recording):
         if (current_app.config.get('TRANSCRIPTION_SETUP_PENDING')
                 and (recording.error_message or '').startswith(PENDING_SETUP)):
             return 'asr_pending'
+        evidence = f"{recording.error_message or ''}\n{(recording.transcription or '')[:2000]}"
+        if any(code in evidence for code in NO_SPEECH_CODES):
+            return 'no_speech'
         return 'failed'
     summary = (recording.summary or '').strip()
     if summary == SHORT_SUMMARY:
         return 'too_short'
     return 'ready' if summary and not summary.startswith(SUMMARY_SENTINELS) else 'no_minutes'
+
+
+def friendly_error(message, transcription, has_transcript):
+    """把内部报错翻成给用户看的话。返回 (文字, 值不值得重试)。"""
+    from src.utils.error_formatting import is_transcription_error
+    text = ' '.join(str(message or '').split())
+    if not text and is_transcription_error(transcription or ''):
+        text = (transcription or '')[:500]
+    lowered = text.lower()
+    if has_transcript:
+        # 摘要那一步：会议助手给的原因本来就是中文的说明
+        if re.search(r'[\u4e00-\u9fff]', text) and len(text) < 200 and 'traceback' not in lowered:
+            return text, True
+        return '会议助手这次没有完成，可以重试。', True
+    if any(key in lowered for key in ('moov atom', 'invalid data', 'error opening input', 'could not find codec',
+                                      'conversion of', 'no audio stream', 'decode')):
+        return '录音文件已损坏或格式不支持，读不出声音。', False
+    if 'too large' in lowered or 'exceeds' in lowered:
+        return '录音文件太大，超出了转写服务的限制。', False
+    if any(key in lowered for key in ('timeout', 'timed out', 'connection', 'temporarily', '502', '503', '504')):
+        return '转写服务暂时连不上，可以稍后重试。', True
+    if 'aliyun' in lowered or 'asr' in lowered:
+        return '转写服务处理这段录音时出错了，可以重试。', True
+    return '录音没能整理成文字，可以重试。', True
 
 
 def _iso(value):
@@ -126,9 +158,14 @@ def transcript_rows(transcription):
         if not isinstance(content, str) or not content.strip():
             continue
         start = segment.get('start_time')
+        end = segment.get('end_time')
+        valid = lambda v: isinstance(v, (int, float)) and 0 <= v < 7 * 86400
         rows.append({
             'speaker': _speaker(segment.get('speaker'), anonymous),
-            'start': int(start) if isinstance(start, (int, float)) and 0 <= start < 7 * 86400 else None,
+            'start': int(start) if valid(start) else None,
+            # 字幕定位用的精确时间（秒，保留一位小数）
+            't0': round(float(start), 1) if valid(start) else None,
+            't1': round(float(end), 1) if valid(end) else None,
             'text': content.strip(),
         })
     return rows
@@ -167,6 +204,9 @@ def list_meetings():
 @login_required
 @audit.access('recording.viewed', dedup=audit.DEDUP_VIEW)
 def meeting_detail(recording_id):
+    from src.models.meeting_assistant import SummaryVersion
+    from src.services.meeting_assistant.service import last_failure, legacy_summary
+
     recording = Recording.query.filter_by(id=recording_id, user_id=current_user.id).first()
     if recording is None:
         return _json({'error': '找不到这条会议记录。'}, 404)
@@ -178,7 +218,30 @@ def meeting_detail(recording_id):
         url_for('recordings.get_audio', recording_id=recording.id)
         if phase != 'saving' and recording.audio_path and not recording.audio_deleted_at else None
     )
+    result['duration'] = recording.get_audio_duration(allow_probe_fallback=False)
+
+    # 会议助手的摘要版本：重新生成期间也照常显示当前版本。
+    versions = (SummaryVersion.query.filter_by(recording_id=recording.id)
+                .order_by(SummaryVersion.version.desc()).all())
+    result['versions'] = [v.to_dict() for v in versions]
+    summary_text = versions[0].markdown if versions else legacy_summary(recording)
     if phase in ACTIVE.values():
+        job = (ProcessingJob.query.filter(ProcessingJob.recording_id == recording.id,
+                                          ProcessingJob.status == 'processing')
+               .order_by(ProcessingJob.id.desc()).first())
+        result['progress'] = job.stage_detail if job else None
+        result['progress_started_at'] = _iso(job.started_at) if job and job.started_at else None
+        if phase == 'summarizing':
+            from src.models.meeting_assistant import AssistantTraceEvent
+            # 只给本次任务开始之后的记录（任务还在排队时就是空的）
+            events = (AssistantTraceEvent.query.filter_by(recording_id=recording.id)
+                      .filter(AssistantTraceEvent.started_at >= job.started_at)
+                      .order_by(AssistantTraceEvent.seq.desc()).limit(60).all()) if job and job.started_at else []
+            result['trace'] = [event.to_dict() for event in reversed(events)]
+        if phase == 'summarizing' and summary_text:
+            result['summary_html'] = document_html(summary_text)
+            result['transcript'] = transcript_rows(recording.transcription)
+            result['regenerating'] = True
         return _json(result)
 
     transcript = transcript_rows(recording.transcription)
@@ -188,11 +251,19 @@ def meeting_detail(recording_id):
     elif (phase == 'failed' and not transcript and not current_app.config.get('TRANSCRIPTION_SETUP_PENDING')
           and recording.audio_path and not recording.audio_deleted_at):
         retry = 'transcription'
+    failure = last_failure(recording.id) if phase == 'ready' else None
+    if phase == 'failed':
+        result['error'], retryable = friendly_error(recording.error_message, recording.transcription, bool(transcript))
+        result['failed_step'] = 'summary' if transcript else 'audio'
+        if not retryable:
+            retry = None
     result.update(
-        summary_html=document_html(recording.summary) if phase == 'ready' else '',
+        summary_html=document_html(summary_text) if phase == 'ready' and summary_text else '',
         transcript=transcript,
         retry=retry,
-        duration=recording.get_audio_duration(allow_probe_fallback=False),
+        can_regenerate=bool(transcript) and phase == 'ready',
+        regenerate_error=failure[0] if failure else None,
+        regenerate_error_at=_iso(failure[1]) if failure else None,
     )
     return _json(result)
 

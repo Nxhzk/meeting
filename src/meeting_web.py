@@ -8,6 +8,15 @@ from flask_wtf.csrf import generate_csrf
 from src.utils.localization import translate
 
 
+def current_build():
+    """已构建的前端入口文件名（带内容哈希）：页面更新后它会变，页面据此发现自己是旧版本。"""
+    manifest = Path(current_app.static_folder) / 'meeting' / 'manifest.json'
+    try:
+        return json.loads(manifest.read_text(encoding='utf-8'))['src/main.jsx']['file']
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def render_page(page, **props):
     manifest = Path(current_app.static_folder) / 'meeting' / 'manifest.json'
     try:
@@ -28,6 +37,7 @@ def render_page(page, **props):
             styles=[url_for('static', filename=f'meeting/{style}') for style in entry.get('css', [])],
             bootstrap={
                 'page': page,
+                'build': entry['file'],
                 'csrfToken': generate_csrf(),
                 'prefix': request.script_root,
                 'homeUrl': url_for('recordings.index'),

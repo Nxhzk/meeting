@@ -34,9 +34,17 @@
             </intent-filter>
         </activity>
 
+        <!-- 网页录音（浏览器、旧版页面）：让主进程在后台不被停掉。 -->
         <service
             android:name=".RecordingService"
             android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- 原生录音：独立进程，界面被划掉、网页渲染进程崩溃时，录音和上传照常进行。 -->
+        <service
+            android:name=".NativeRecordingService"
+            android:exported="false"
+            android:process=":recorder"
             android:foregroundServiceType="microphone" />
     </application>
 </manifest>

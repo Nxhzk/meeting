@@ -103,7 +103,7 @@ def _allowed_mime_types():
     # handling.
     raw = os.environ.get(
         'RECORDING_SESSION_ALLOWED_MIME_TYPES',
-        'audio/webm,audio/ogg,audio/mp4,audio/mpeg,audio/wav,audio/x-m4a,video/webm,video/mp4',
+        'audio/webm,audio/ogg,audio/mp4,audio/mpeg,audio/wav,audio/x-m4a,audio/aac,video/webm,video/mp4',
     )
     return {m.strip().lower() for m in raw.split(',') if m.strip()}
 

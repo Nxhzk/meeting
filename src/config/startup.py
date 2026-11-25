@@ -254,6 +254,10 @@ def start_job_queue(app):
     job_queue.recover_orphaned_jobs()
     job_queue.start()
 
+    # 小助理：到点的提醒、今日简报、积分刷新（和任务队列一样只在主进程里跑）
+    from src.services.companion import scheduler as companion_scheduler
+    companion_scheduler.start(app)
+
     status = job_queue.get_queue_status()
     t_queue = status['transcription_queue']
     s_queue = status['summary_queue']
