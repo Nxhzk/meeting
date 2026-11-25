@@ -346,7 +346,7 @@ function proactiveLabel(message) {
 }
 
 // ------------------------------------------------------------ 页面
-export function CompanionPage({ companion, openMeeting, onBack }) {
+export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
     const toast = useToast();
     const scroller = useRef(null);
     const field = useRef(null);
@@ -617,7 +617,9 @@ export function CompanionPage({ companion, openMeeting, onBack }) {
     const toolBusy = live?.segments.some(seg => seg.tools.some(t => t.status === 'running'));
 
     return <div className="companion">
-        <header className="companion-head glass glass-strong">
+        {/* 抽屉顶部：按住往下拖可以收起（只认这一条，聊天区上下滑照常滚动） */}
+        <header className="companion-head glass glass-strong" onPointerDown={event => { if (onGrab && !event.target.closest('button')) onGrab(event); }}>
+            {onGrab && <span className="drawer-grabber" aria-hidden="true" />}
             <div className="companion-title">
                 <NavButton icon="back" label="返回" onClick={onBack} />
                 <LiquidOrb size={34} energy={running ? .9 : .3} />

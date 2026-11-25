@@ -140,7 +140,7 @@ svg { flex: none; }
 .navbar[data-scrolled='true'] .navbar-glass { opacity: 1; }
 .navbar-glass.glass { box-shadow: inset 0 -.5px 0 var(--separator); }
 .navbar-glass.glass::before { display: none; }
-.navbar-title { position: absolute; left: 50%; transform: translateX(-50%); max-width: 56%; font-weight: 600; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.navbar-title { position: absolute; left: 22%; right: 22%; text-align: center; font-weight: 600; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .navbar-side { position: relative; display: flex; align-items: center; gap: 2px; min-width: 44px; z-index: 1; }
 .navbar-side:last-child { justify-content: flex-end; }
 .large-title { width: min(var(--content-w), 100%); margin: 0 auto; padding: 2px 20px 10px; font: 700 34px/1.12 var(--display); letter-spacing: -.02em; transform-origin: left center; }
@@ -699,8 +699,13 @@ button.row:not(:disabled):active, a.row:active { background: var(--card-2); }
 .dock-card.glass { clip-path: inset(0 round 30px); }
 .credits-pill.glass { clip-path: inset(0 round 16px); }
 
-/* ------------------------------------------------------------ 小助理：全屏对话（不显示标签栏） */
+/* ------------------------------------------------------------ 小助理：从底部拉起的抽屉，盖在当前页面上 */
 .tg-stack { position: fixed; inset: 0; z-index: 30; }
+.drawer-scrim { position: fixed; inset: 0; z-index: 29; background: var(--scrim); touch-action: none; }
+.tg-stack.drawer { top: calc(var(--safe-top) + 10px); border-radius: 14px 14px 0 0; overflow: hidden;
+    box-shadow: 0 -8px 30px rgba(0, 0, 0, .18); }
+.tg-stack.drawer .companion-head { padding-top: 16px; touch-action: none; }
+.drawer-grabber { position: absolute; top: 5px; left: 50%; width: 38px; height: 5px; margin-left: -19px; border-radius: 3px; background: var(--label-3); }
 .tg-stack .companion { position: absolute; }
 .tg-stack .composer { bottom: calc(var(--safe-bottom) + 12px); }
 .companion-title .nav-button { margin-right: -4px; }

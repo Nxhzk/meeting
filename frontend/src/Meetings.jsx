@@ -245,6 +245,71 @@ function TabBar({ tab, select, badges = {} }) {
     </nav>;
 }
 
+// ------------------------------------------------------------ 左右滑动切换标签
+// 只认明显的横向快滑；以下情况一律不算，避免和别的手势打架：
+// 从屏幕左右边缘开始（系统返回手势、详情页边缘返回）、多指、起手先竖着滑（在滚动页面）、
+// 落在能横向滚动的内容 / 输入框 / 弹层 / 录音条上、正在选文字。
+const swipeOrder = ['meetings', 'memory', 'settings'];
+const EDGE = 28;
+
+function scrollsSideways(node) {
+    for (let el = node; el && el !== document.body; el = el.parentElement) {
+        if (el.scrollWidth > el.clientWidth + 2) {
+            const overflow = getComputedStyle(el).overflowX;
+            if (overflow === 'auto' || overflow === 'scroll') return true;
+        }
+    }
+    return false;
+}
+
+function useTabSwipe(enabled, onSwipe) {
+    const handler = useRef(onSwipe);
+    handler.current = onSwipe;
+    useEffect(() => {
+        if (!enabled) return;
+        let start = null;
+        const down = event => {
+            start = null;
+            if (event.touches.length !== 1) return;
+            const touch = event.touches[0];
+            const target = event.target instanceof Element ? event.target : null;
+            if (touch.clientX < EDGE || touch.clientX > window.innerWidth - EDGE) return;
+            if (!target || target.closest('input, textarea, select, [contenteditable], dialog, .dock, [data-no-swipe]')) return;
+            if (scrollsSideways(target)) return;
+            start = { x: touch.clientX, y: touch.clientY, t: performance.now(), lock: null };
+        };
+        const move = event => {
+            if (!start) return;
+            if (event.touches.length !== 1) { start = null; return; }
+            const touch = event.touches[0];
+            const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
+            if (!start.lock && Math.hypot(dx, dy) > 10) start.lock = Math.abs(dx) > Math.abs(dy) * 1.5 ? 'x' : 'y';
+            if (start.lock === 'y') start = null;
+        };
+        const up = event => {
+            if (!start || start.lock !== 'x') { start = null; return; }
+            const touch = event.changedTouches[0];
+            const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
+            const fast = Math.abs(dx) / Math.max(1, performance.now() - start.t) > .35;
+            start = null;
+            if (String(window.getSelection?.() || '')) return;
+            if (Math.abs(dy) > Math.abs(dx) * .6) return;
+            if (Math.abs(dx) > 80 || (fast && Math.abs(dx) > 40)) handler.current(dx < 0 ? 1 : -1);
+        };
+        const cancel = () => { start = null; };
+        window.addEventListener('touchstart', down, { passive: true });
+        window.addEventListener('touchmove', move, { passive: true });
+        window.addEventListener('touchend', up, { passive: true });
+        window.addEventListener('touchcancel', cancel, { passive: true });
+        return () => {
+            window.removeEventListener('touchstart', down);
+            window.removeEventListener('touchmove', move);
+            window.removeEventListener('touchend', up);
+            window.removeEventListener('touchcancel', cancel);
+        };
+    }, [enabled]);
+}
+
 // ------------------------------------------------------------ 主界面
 function Workspace({ config }) {
     const toast = useToast();
@@ -266,8 +331,10 @@ function Workspace({ config }) {
     const [deleteError, setDeleteError] = useState('');
     const detailScroll = useRef(null);
     const edgeDrag = useDragControls();
+    const drawerDrag = useDragControls();
+    const slide = useRef(0);   // 切标签的方向：1 往左滑进来，-1 往右，0 不滑
     const companion = useCompanion(true, config.owner);
-    // 小助理是全屏聊天页（像 Telegram 的对话）：返回时回到进来之前的标签
+    // 小助理是盖在当前页面上的抽屉：底下仍是进来之前的标签页，关掉就回到那里
     const lastTab = useRef('meetings');
     useEffect(() => { if (route.tab !== 'assistant' && route.origin !== 'assistant') lastTab.current = route.tab; }, [route.tab, route.origin]);
     const { mode, startedAt } = record;
@@ -313,6 +380,14 @@ function Workspace({ config }) {
     }, [data.live, optimisticEnd]);
 
     useEffect(() => {
+        // 直接打开 #assistant（通知、刷新）时历史里没有底下那一页：补一条，系统返回键才会关抽屉而不是退出
+        if (readRoute().tab === 'assistant' && !history.state) {
+            history.replaceState({ tab: 'meetings', detail: null }, '', config.homeUrl);
+            history.pushState({ tab: 'assistant', detail: null }, '', '#assistant');
+        }
+    }, [config.homeUrl]);
+
+    useEffect(() => {
         const navigate = () => {
             const next = readRoute();
             if (next.detail && inProgress(capture.current?.mode)) return;
@@ -345,13 +420,23 @@ function Workspace({ config }) {
         else go('', { tab: 'meetings', detail: null }, true);
     }
 
-    function selectTab(item) {
+    function selectTab(item, direction) {
         if (item.key === route.tab && !route.detail && !route.sub) {
             window.scrollTo({ top: 0, behavior: 'smooth' });
             return;
         }
+        // 小助理是抽屉：记一条历史，系统返回键 / 手势会先把它关掉
+        if (item.key === 'assistant') { go(item.hash, { tab: 'assistant', detail: null }); return; }
+        const from = swipeOrder.indexOf(route.tab), to = swipeOrder.indexOf(item.key);
+        slide.current = direction ?? (from < 0 || to < 0 ? 0 : Math.sign(to - from));
         go(item.hash, { tab: item.key, detail: null }, true);
         window.scrollTo(0, 0);
+    }
+
+    function closeAssistant() {
+        if (history.state?.tab === 'assistant' && history.length > 1) { history.back(); return; }
+        const item = tabs.find(t => t.key === lastTab.current) || tabs[1];
+        go(item.hash, { tab: item.key, detail: null }, true);
     }
 
     function openLive(id) { setLiveError(''); setLiveId(id); }
@@ -412,13 +497,16 @@ function Workspace({ config }) {
         localSession={['recording', 'paused', 'saving', 'opening'].includes(mode) ? capture.current?.session?.id : null} />;
     const companionPage = <CompanionPage key="assistant" companion={companion}
         openMeeting={id => go(`#meeting-${id}`, { tab: 'meetings', detail: id, origin: 'assistant' })}
-        onBack={() => { const item = tabs.find(t => t.key === lastTab.current) || tabs[1]; go(item.hash, { tab: item.key, detail: null }, true); }} />;
+        onBack={closeAssistant} onGrab={event => drawerDrag.start(event)} />;
     const showAssistant = route.tab === 'assistant' || overAssistant;
-    const tabPage = route.tab === 'memory' ? <MemoryPage key="memory" config={config} sub={route.sub}
+    // 抽屉底下显示的那一页
+    const base = showAssistant ? lastTab.current : route.tab;
+    const baseDetail = showAssistant ? null : detail;
+    const tabPage = base === 'memory' ? <MemoryPage key="memory" config={config} sub={route.sub}
         openMeeting={id => go(`#meeting-${id}`, { tab: 'meetings', detail: id })}
         openHistory={() => go('#memory-history', { tab: 'memory', detail: null, sub: 'history' })}
         closeHistory={() => history.state?.sub === 'history' ? history.back() : go('#memory', { tab: 'memory', detail: null }, true)} />
-        : route.tab === 'settings' ? <SettingsPage key="settings" config={config} locked={actionsLocked} />
+        : base === 'settings' ? <SettingsPage key="settings" config={config} locked={actionsLocked} />
         : null;
 
     const updateChip = stale && !actionsLocked && mode === 'idle'
@@ -427,12 +515,21 @@ function Workspace({ config }) {
             <Icon name="refresh" />页面有新版本<strong>刷新</strong>
         </motion.button></div> : null;
 
-    return <div className="app" data-tab={showAssistant ? 'assistant' : route.tab} data-split={split && route.tab === 'meetings' ? 'true' : undefined}>
-        {route.tab === 'meetings' && !overAssistant ? (split ? <div className="split">
+    const canSwipe = !showAssistant && swipeOrder.includes(route.tab) && !route.sub && !(route.detail && !split)
+        && !liveId && !deleteTarget;
+    useTabSwipe(canSwipe, step => {
+        const next = swipeOrder[swipeOrder.indexOf(route.tab) + step];
+        if (next) selectTab(tabs.find(t => t.key === next), step);
+    });
+    useEffect(() => { slide.current = 0; }, [route]);
+    const enter = slide.current ? { opacity: 0, x: slide.current * 36 } : { opacity: 0, y: 10 };
+
+    return <div className="app" data-tab={base} data-assistant={showAssistant ? 'open' : undefined} data-split={split && base === 'meetings' ? 'true' : undefined}>
+        {base === 'meetings' ? (split ? <div className="split">
             <div className="split-list">{home}</div>
             <div className="split-detail">
                 <AnimatePresence mode="wait" initial={false}>
-                    {detail ? <motion.div key={route.detail} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={pushSpring}>
+                    {baseDetail ? <motion.div key={route.detail} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={pushSpring}>
                         <div className="page-stack" ref={detailScroll}>{detail}</div>
                     </motion.div> : <motion.div key="empty" className="split-empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                         <div className="empty"><Icon name="doc" /><strong>选择一场会议</strong><p>会议摘要、注意事项和发言原文会显示在这里。</p></div>
@@ -440,10 +537,11 @@ function Workspace({ config }) {
                 </AnimatePresence>
             </div>
         </div> : <>
-            <motion.div animate={{ x: detail ? '-28%' : 0, filter: detail ? 'brightness(.92)' : 'brightness(1)' }} transition={pushSpring}
-                aria-hidden={detail ? true : undefined} style={{ pointerEvents: detail ? 'none' : undefined }}>{home}</motion.div>
+            <motion.div initial={slide.current ? { opacity: 0, x: slide.current * 36 } : false}
+                animate={{ opacity: 1, x: baseDetail ? '-28%' : 0, filter: baseDetail ? 'brightness(.92)' : 'brightness(1)' }} transition={pushSpring}
+                aria-hidden={baseDetail ? true : undefined} style={{ pointerEvents: baseDetail ? 'none' : undefined }}>{home}</motion.div>
             <AnimatePresence>
-                {detail && <motion.div key={route.detail} className="page-stack" ref={detailScroll}
+                {baseDetail && <motion.div key={route.detail} className="page-stack" ref={detailScroll}
                     initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={pushSpring}
                     // 和 iOS 一样只认从屏幕左边缘开始的滑动：页面里表格、波形的横向滑动不会触发返回
                     drag="x" dragListener={false} dragControls={edgeDrag} dragDirectionLock
@@ -453,15 +551,19 @@ function Workspace({ config }) {
                     {detail}
                 </motion.div>}
             </AnimatePresence>
-        </>) : showAssistant ? null : <AnimatePresence mode="wait" initial={false}>
-            <motion.div key={route.tab + (route.sub || '')} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+        </>) : <AnimatePresence mode="wait" initial={false}>
+            <motion.div key={base + (route.sub || '')} initial={enter} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0 }}
                 transition={{ duration: .22, ease: [.3, .7, .4, 1] }}>{tabPage}</motion.div>
         </AnimatePresence>}
         <AnimatePresence>{updateChip}</AnimatePresence>
-        {/* 小助理：全屏对话，从右侧推入（像 Telegram 打开一个聊天） */}
+        {/* 小助理：从底部拉起的抽屉，盖在当前页面上；往下拖顶部、点上面露出的部分或按返回都能关 */}
         <AnimatePresence>
-            {showAssistant && <motion.div key="assistant" className="tg-stack"
-                initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={pushSpring}>{companionPage}</motion.div>}
+            {showAssistant && <motion.div key="scrim" className="drawer-scrim" onClick={closeAssistant}
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: .25 }} />}
+            {showAssistant && <motion.div key="assistant" className="tg-stack drawer"
+                initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }} transition={pushSpring}
+                drag="y" dragListener={false} dragControls={drawerDrag} dragConstraints={{ top: 0, bottom: 0 }} dragElastic={{ top: 0, bottom: .7 }}
+                onDragEnd={(_e, info) => { if (info.offset.y > 140 || info.velocity.y > 700) closeAssistant(); }}>{companionPage}</motion.div>}
         </AnimatePresence>
         <AnimatePresence>
             {overAssistant && <motion.div key={route.detail} className="page-stack over-assistant" ref={detailScroll}
@@ -474,14 +576,14 @@ function Workspace({ config }) {
             </motion.div>}
         </AnimatePresence>
 
-        <div hidden={showAssistant || (Boolean(route.tab !== 'meetings' || (!split && route.detail)) && !['recording', 'paused', 'saving', 'opening'].includes(mode))}>
+        <div hidden={(Boolean(base !== 'meetings' || (!split && baseDetail)) && !['recording', 'paused', 'saving', 'opening'].includes(mode))}>
             <RecordingDock mode={remote ? 'remote' : mode} startedAt={startedAt} notice={notice} meter={meter}
                 low={Boolean(!split && route.detail)}
                 disabled={['opening', 'saving', 'restoring'].includes(mode) || deleting || (mode === 'idle' && data.error === 'login')}
                 action={() => { setNotice({}); if (remote) openLive(data.live[0].id); else capture.current?.press(); }} />
         </div>
-        {!(route.tab === 'meetings' && route.detail && !split) && !showAssistant && <TabBar tab={route.tab} select={selectTab}
-            badges={{ assistant: route.tab === 'assistant' ? 0 : companion.unread, meetings: route.tab !== 'meetings' && busyPhases.has(mode) ? 1 : 0 }} />}
+        {!(base === 'meetings' && baseDetail && !split) && <TabBar tab={base} select={item => selectTab(item)}
+            badges={{ assistant: showAssistant ? 0 : companion.unread, meetings: route.tab !== 'meetings' && busyPhases.has(mode) ? 1 : 0 }} />}
 
         <Sheet open={Boolean(liveId)} onClose={() => setLiveId(null)} busy={ending} title="进行中的会议"
             actions={[<button key="b" className="btn btn-gray" type="button" disabled={ending} onClick={() => setLiveId(null)}>返回</button>,
