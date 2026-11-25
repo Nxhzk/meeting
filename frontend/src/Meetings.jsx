@@ -262,9 +262,9 @@ function scrollsSideways(node) {
     return false;
 }
 
-function useTabSwipe(enabled, onSwipe) {
-    const handler = useRef(onSwipe);
-    handler.current = onSwipe;
+function useTabSwipe(enabled, { move: onMove, end: onEnd }) {
+    const handler = useRef({ onMove, onEnd });
+    handler.current = { onMove, onEnd };
     useEffect(() => {
         if (!enabled) return;
         let start = null;
@@ -284,7 +284,8 @@ function useTabSwipe(enabled, onSwipe) {
             const touch = event.touches[0];
             const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
             if (!start.lock && Math.hypot(dx, dy) > 10) start.lock = Math.abs(dx) > Math.abs(dy) * 1.5 ? 'x' : 'y';
-            if (start.lock === 'y') start = null;
+            if (start.lock === 'y') { start = null; return; }
+            if (start.lock === 'x') handler.current.onMove(dx);   // 页面跟着手指走
         };
         const up = event => {
             if (!start || start.lock !== 'x') { start = null; return; }
@@ -292,11 +293,11 @@ function useTabSwipe(enabled, onSwipe) {
             const dx = touch.clientX - start.x, dy = touch.clientY - start.y;
             const fast = Math.abs(dx) / Math.max(1, performance.now() - start.t) > .35;
             start = null;
-            if (String(window.getSelection?.() || '')) return;
-            if (Math.abs(dy) > Math.abs(dx) * .6) return;
-            if (Math.abs(dx) > 80 || (fast && Math.abs(dx) > 40)) handler.current(dx < 0 ? 1 : -1);
+            const ok = !String(window.getSelection?.() || '') && Math.abs(dy) <= Math.abs(dx) * .6
+                && (Math.abs(dx) > window.innerWidth * .28 || (fast && Math.abs(dx) > 40));
+            handler.current.onEnd(ok ? (dx < 0 ? 1 : -1) : 0);
         };
-        const cancel = () => { start = null; };
+        const cancel = () => { if (start?.lock === 'x') handler.current.onEnd(0); start = null; };
         window.addEventListener('touchstart', down, { passive: true });
         window.addEventListener('touchmove', move, { passive: true });
         window.addEventListener('touchend', up, { passive: true });
@@ -332,7 +333,9 @@ function Workspace({ config }) {
     const detailScroll = useRef(null);
     const edgeDrag = useDragControls();
     const drawerDrag = useDragControls();
-    const slide = useRef(0);   // 切标签的方向：1 往左滑进来，-1 往右，0 不滑
+    const slide = useRef(0);   // 切标签的方向：1 从右边进来，-1 从左边，0 不滑
+    const swiped = useRef(false);   // 这次切换是手指滑过去的：新页面整页滑入
+    const swipeX = useMotionValue(0);
     const companion = useCompanion(true, config.owner);
     // 小助理是盖在当前页面上的抽屉：底下仍是进来之前的标签页，关掉就回到那里
     const lastTab = useRef('meetings');
@@ -517,14 +520,29 @@ function Workspace({ config }) {
 
     const canSwipe = !showAssistant && swipeOrder.includes(route.tab) && !route.sub && !(route.detail && !split)
         && !liveId && !deleteTarget;
-    useTabSwipe(canSwipe, step => {
-        const next = swipeOrder[swipeOrder.indexOf(route.tab) + step];
-        if (next) selectTab(tabs.find(t => t.key === next), step);
+    const neighbour = step => swipeOrder[swipeOrder.indexOf(route.tab) + step];
+    useTabSwipe(canSwipe, {
+        // 两头没有下一页时加阻尼，松手弹回
+        move: dx => swipeX.set(neighbour(dx < 0 ? 1 : -1) ? dx : dx * .25),
+        end: step => {
+            const next = step && neighbour(step);
+            if (!next) { animate(swipeX, 0, spring); return; }
+            // 旧页面顺着手势滑出去，新页面从另一边整页滑进来
+            animate(swipeX, -step * window.innerWidth, { type: 'tween', duration: .16, ease: [.3, .7, .4, 1] }).then(() => {
+                swiped.current = true;
+                selectTab(tabs.find(t => t.key === next), step);
+                swipeX.set(0);
+            });
+        },
     });
-    useEffect(() => { slide.current = 0; }, [route]);
-    const enter = slide.current ? { opacity: 0, x: slide.current * 36 } : { opacity: 0, y: 10 };
+    useEffect(() => { slide.current = 0; swiped.current = false; }, [route]);
+    const fade = useTransform(swipeX, x => 1 - Math.min(.35, Math.abs(x) / window.innerWidth * .5));
+    const enterX = slide.current * (swiped.current ? window.innerWidth : 48);
+    const enter = slide.current ? { opacity: swiped.current ? 1 : 0, x: enterX } : { opacity: 0, y: 10 };
+    const enterMotion = slide.current ? { type: 'spring', stiffness: 380, damping: 38, mass: .9 } : { duration: .22, ease: [.3, .7, .4, 1] };
 
     return <div className="app" data-tab={base} data-assistant={showAssistant ? 'open' : undefined} data-split={split && base === 'meetings' ? 'true' : undefined}>
+        <motion.div className="swipe-host" style={{ x: swipeX, opacity: fade }}>
         {base === 'meetings' ? (split ? <div className="split">
             <div className="split-list">{home}</div>
             <div className="split-detail">
@@ -537,8 +555,8 @@ function Workspace({ config }) {
                 </AnimatePresence>
             </div>
         </div> : <>
-            <motion.div initial={slide.current ? { opacity: 0, x: slide.current * 36 } : false}
-                animate={{ opacity: 1, x: baseDetail ? '-28%' : 0, filter: baseDetail ? 'brightness(.92)' : 'brightness(1)' }} transition={pushSpring}
+            <motion.div initial={slide.current ? enter : false}
+                animate={{ opacity: 1, x: baseDetail ? '-28%' : 0, filter: baseDetail ? 'brightness(.92)' : 'brightness(1)' }} transition={slide.current ? enterMotion : pushSpring}
                 aria-hidden={baseDetail ? true : undefined} style={{ pointerEvents: baseDetail ? 'none' : undefined }}>{home}</motion.div>
             <AnimatePresence>
                 {baseDetail && <motion.div key={route.detail} className="page-stack" ref={detailScroll}
@@ -551,10 +569,12 @@ function Workspace({ config }) {
                     {detail}
                 </motion.div>}
             </AnimatePresence>
-        </>) : <AnimatePresence mode="wait" initial={false}>
-            <motion.div key={base + (route.sub || '')} initial={enter} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0 }}
-                transition={{ duration: .22, ease: [.3, .7, .4, 1] }}>{tabPage}</motion.div>
+        </>) : <AnimatePresence mode="popLayout" initial={slide.current !== 0}>
+            {/* 旧页面立刻让位（滑动时它已经滑出屏幕），新页面按方向滑进来 */}
+            <motion.div key={base + (route.sub || '')} initial={enter} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, transition: { duration: 0 } }}
+                transition={enterMotion}>{tabPage}</motion.div>
         </AnimatePresence>}
+        </motion.div>
         <AnimatePresence>{updateChip}</AnimatePresence>
         {/* 小助理：从底部拉起的抽屉，盖在当前页面上；往下拖顶部、点上面露出的部分或按返回都能关 */}
         <AnimatePresence>
