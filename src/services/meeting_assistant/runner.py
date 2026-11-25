@@ -270,8 +270,16 @@ def _command(settings, work, session_file, message_file):
 def run(settings, run_input, system_prompt, report=None, cancel_requested=None, trace=None):
     """跑一次 pi。返回 RunResult；超时或被取消时抛异常。"""
     settings.check()
-    work = Path(tempfile.mkdtemp(prefix='jst-assistant-', dir=settings.work_root)).resolve()
+    from src.services import assistant_capacity as capacity
+    # 先看内存放不放得下：放不下就排队，页面上显示「排队中」
     try:
+        slot = capacity.wait(capacity.SUMMARY, 'summary', cancelled=cancel_requested,
+                             on_wait=lambda pos: report and report(f'排队中，前面还有 {pos} 个任务' if pos else '排队中，下一个就是'))
+    except capacity.Cancelled:
+        raise AssistantCanceled()
+    work = None
+    try:
+        work = Path(tempfile.mkdtemp(prefix='jst-assistant-', dir=settings.work_root)).resolve()
         meeting_dir = work / 'meeting'
         for rel, text in run_input.meeting_files.items():
             _write(meeting_dir / rel, text)
@@ -317,7 +325,9 @@ def run(settings, run_input, system_prompt, report=None, cancel_requested=None, 
         result.session_jsonl = session_file.read_text(encoding='utf-8') if session_file.exists() else None
         return result
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+        capacity.release(slot)
 
 
 def _kill(process):

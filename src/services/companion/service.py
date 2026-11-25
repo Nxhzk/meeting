@@ -8,6 +8,7 @@ from flask import current_app
 from src.database import db
 from src.models import User
 from src.models.companion import CompanionMessage, CompanionSession, Reminder
+from src.services import assistant_capacity as capacity
 from src.services.companion import hub, runner, schedule
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,8 @@ class Busy(RuntimeError):
 
 _send_locks = {}
 _send_locks_guard = threading.Lock()
-_queued = {}    # user_id -> [prompt]：后台提醒运行期间用户发来的消息
+_queued = {}    # user_id -> [prompt]：等着回复的消息（后台提醒正在跑，或者内存放不下、在排队）
+_tickets = {}   # user_id -> capacity.Ticket：在等内存空出来
 
 
 QUEUED_RUN = 'queued'   # 后台提醒期间收下的消息在等回复：页面上显示「正在输入」，但还没有真正的回复
@@ -95,8 +97,76 @@ def live_snapshot(user_id):
         if snap is not None:
             return snap
     if has_queued(user_id):
-        return {'run': QUEUED_RUN, 'segments': [], 'thinking': False, 'stopping': False, 'waiting': True}
+        return {'run': QUEUED_RUN, 'segments': [], 'thinking': False, 'stopping': False, 'waiting': True,
+                'queue': _queue_position(user_id)}
     return None
+
+
+# ---------------------------------------------------------------- 排队（内存放不下时）
+
+def _queue_position(user_id):
+    ticket = _tickets.get(user_id)
+    return capacity.position(ticket) if ticket is not None else None
+
+
+def _wait_for_capacity(app, user_id, prompts):
+    """内存放不下：消息先收下排队，轮到时自动开始回复。调用方持有 _user_lock。"""
+    first = not has_queued(user_id)
+    _queued.setdefault(user_id, []).extend(prompts)
+    if user_id not in _tickets:
+        _tickets[user_id] = capacity.enqueue(capacity.CHAT, f'companion:{user_id}',
+                                             lambda slot: _start_admitted(app, user_id, slot))
+    logger.info('Companion: no memory headroom, user %s queued (%s)', user_id, capacity.status())
+    with hub.guard(user_id):
+        hub.publish(user_id, 'run', {'state': 'start' if first else 'queue', 'run': QUEUED_RUN, 'waiting': True,
+                                     'queue': _queue_position(user_id)})
+
+
+def _start_admitted(app, user_id, slot):
+    """排队轮到了：用占好的名额开始回复。"""
+    with app.app_context(), _user_lock(user_id):
+        _tickets.pop(user_id, None)
+        pending = _queued.pop(user_id, None)
+        if not pending or runner.active(user_id) is not None:
+            # 用户已经取消；或者后台提醒正在跑（它结束后会接着回复这些消息）
+            if pending:
+                _queued[user_id] = pending
+            capacity.release(slot)
+            return
+        try:
+            _start_chat(user_id, '\n\n'.join(pending), slot=slot)
+        except Exception:
+            capacity.release(slot)
+            logger.exception('Queued companion message for user %s could not start', user_id)
+            _reply_failed(user_id)
+
+
+def _reply_failed(user_id):
+    with hub.guard(user_id):
+        message = CompanionMessage(user_id=user_id, role='assistant', kind='chat',
+                                   content='抱歉，小助理暂时没法回复，请稍后再发一次。', meta={'error': True})
+        db.session.add(message)
+        db.session.commit()
+        hub.publish(user_id, 'message', message_json(message))
+        hub.publish(user_id, 'run', {'state': 'end', 'run': QUEUED_RUN})
+
+
+def _publish_positions():
+    for user_id in list(_tickets):
+        position = _queue_position(user_id)
+        if position is not None:
+            hub.publish(user_id, 'run', {'state': 'queue', 'run': QUEUED_RUN, 'queue': position})
+
+
+capacity.on_change(_publish_positions)
+
+
+def _start_or_wait(user_id, prompts):
+    """开始回复；内存放不下就排队。调用方持有 _user_lock。"""
+    try:
+        _start_chat(user_id, '\n\n'.join(prompts))
+    except runner.NoCapacity:
+        _wait_for_capacity(current_app._get_current_object(), user_id, prompts)
 
 
 def _recent_duplicate(user_id, client_id):
@@ -129,11 +199,15 @@ def _user_lock(user_id):
         return _send_locks.setdefault(user_id, threading.Lock())
 
 
-def _start_chat(user_id, prompt):
+def _start_chat(user_id, prompt, slot=None):
     session = _session(user_id)
     app = current_app._get_current_object()
-    run = runner.CompanionRun(app, user_id, session.session_jsonl, SYSTEM_PROMPT, on_finish=_finish_chat, on_after=_follow_up)
-    run.start(prompt)
+    try:
+        run = runner.CompanionRun(app, user_id, session.session_jsonl, SYSTEM_PROMPT, on_finish=_finish_chat, on_after=_follow_up)
+    except Exception:
+        capacity.release(slot)
+        raise
+    run.start(prompt, slot=slot)
     return run
 
 
@@ -151,8 +225,8 @@ def send(user_id, text, client_id=None):
         if duplicate is not None:
             return duplicate
         run = runner.active(user_id)
-        if run is not None and run.proactive:
-            # 后台正在跑提醒：先收下，提醒一结束就回复（期间不再开始新的提醒）
+        if (run is not None and run.proactive) or (run is None and has_queued(user_id)):
+            # 后台正在跑提醒、或者在排队等内存：先收下，轮到时和前面的一起回复（期间不再开始新的提醒）
             with hub.guard(user_id):
                 message = CompanionMessage(user_id=user_id, role='user', kind='chat', content=text, meta=meta)
                 db.session.add(message)
@@ -161,7 +235,8 @@ def send(user_id, text, client_id=None):
                 first = not has_queued(user_id)
                 _queued.setdefault(user_id, []).append(prompt)
                 if first:
-                    hub.publish(user_id, 'run', {'state': 'start', 'run': QUEUED_RUN, 'waiting': True})
+                    hub.publish(user_id, 'run', {'state': 'start', 'run': QUEUED_RUN, 'waiting': True,
+                                                 'queue': _queue_position(user_id)})
             return message
         if run is not None:
             with hub.guard(user_id):
@@ -185,6 +260,9 @@ def send(user_id, text, client_id=None):
         hub.publish(user_id, 'message', message_json(message))
         try:
             _start_chat(user_id, prompt)
+        except runner.NoCapacity:
+            # 内存放不下：不报错，排队，轮到了自动回复
+            _wait_for_capacity(current_app._get_current_object(), user_id, [prompt])
         except RuntimeError as exc:
             # 没能开始回复：这条消息撤回（页面上也撤掉，文字还给输入框），免得留下一条没人回的消息
             removed = message.id
@@ -208,16 +286,31 @@ def _follow_up(run):
             return
         logger.info('Companion: %d steer(s) arrived as the reply ended for user %s, replying to them now', len(pending), run.user_id)
         try:
-            _start_chat(run.user_id, '\n\n'.join(pending))
+            _start_or_wait(run.user_id, pending)
         except RuntimeError:
             logger.warning('Companion follow-up for user %s could not start', run.user_id)
 
 
 def stop(user_id):
     run = runner.active(user_id)
-    if run is None or run.proactive:
+    if run is None:
+        return _cancel_queued(user_id)
+    if run.proactive:
         return False
     return run.abort()
+
+
+def _cancel_queued(user_id):
+    """在排队时按了停止：不回复了（消息留着，用户可以再发）。"""
+    with _user_lock(user_id):
+        ticket = _tickets.pop(user_id, None)
+        if ticket is None:
+            return False
+        capacity.cancel(ticket)
+        _queued.pop(user_id, None)
+        with hub.guard(user_id):
+            hub.publish(user_id, 'run', {'state': 'end', 'run': QUEUED_RUN})
+        return True
 
 
 def _finish_chat(run, session_jsonl):
@@ -251,7 +344,7 @@ def _finish_chat(run, session_jsonl):
 
 def clear(user_id):
     """清空对话：聊天记录和 pi 会话一起清掉，长期记忆和提醒不受影响。"""
-    if runner.active(user_id):
+    if runner.active(user_id) or has_queued(user_id):
         raise Busy('小助理正在回复，先停止再清空。')
     CompanionMessage.query.filter_by(user_id=user_id).delete()
     row = CompanionSession.query.filter_by(user_id=user_id).first()
@@ -304,20 +397,14 @@ def _after_proactive(run):
         pending = _queued.pop(run.user_id, None)
         if not pending:
             return
-        if runner.active(run.user_id) is not None:
+        if runner.active(run.user_id) is not None or run.user_id in _tickets:
             _queued.setdefault(run.user_id, [])[:0] = pending
             return
         try:
-            _start_chat(run.user_id, '\n\n'.join(pending))
+            _start_or_wait(run.user_id, pending)
         except Exception:
             logger.exception('Queued companion message for user %s could not start', run.user_id)
-            with hub.guard(run.user_id):
-                message = CompanionMessage(user_id=run.user_id, role='assistant', kind='chat',
-                                           content='抱歉，小助理暂时没法回复，请稍后再发一次。', meta={'error': True})
-                db.session.add(message)
-                db.session.commit()
-                hub.publish(run.user_id, 'message', message_json(message))
-                hub.publish(run.user_id, 'run', {'state': 'end', 'run': QUEUED_RUN})
+            _reply_failed(run.user_id)
 
 
 def _finish_proactive(run, session_jsonl):

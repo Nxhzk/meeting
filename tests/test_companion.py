@@ -214,7 +214,7 @@ class SendOrderingTest(unittest.TestCase):
         from src.services.companion import service
         self.service = service
         self.started = []
-        patcher = mock.patch.object(service, '_start_chat', side_effect=lambda uid, prompt: self.started.append(prompt))
+        patcher = mock.patch.object(service, '_start_chat', side_effect=lambda uid, prompt, slot=None: self.started.append(prompt))
         patcher.start()
         self.addCleanup(patcher.stop)
         service._queued.pop(self.user_id, None)

@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 
 from src.services.meeting_assistant import runner as base
+from src.services import assistant_capacity as capacity
 from src.services.companion import hub, tokens
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,10 @@ def active(user_id):
     with _lock:
         run = _runs.get(user_id)
     return run if run and not run.finished.is_set() else None
+
+
+class NoCapacity(RuntimeError):
+    """内存放不下再多一个回复：调用方让它排队。"""
 
 
 def _register(run):
@@ -143,8 +148,17 @@ class CompanionRun:
                   '/usr/bin/env', 'NO_PROXY=', 'no_proxy='] + pi
         return pi
 
-    def start(self, message):
+    def start(self, message, slot=None):
+        """slot：排队轮到时带着已经占好的名额；不带时现场看内存放不放得下，放不下抛 NoCapacity。"""
+        self.slot = slot or capacity.acquire(capacity.BACKGROUND if self.proactive else capacity.CHAT, f'companion:{self.user_id}')
+        if self.slot is None:
+            tokens.revoke(self.token)
+            self._cleanup()
+            raise NoCapacity()
         if not _register(self):
+            capacity.release(self.slot)
+            tokens.revoke(self.token)
+            self._cleanup()
             raise RuntimeError('busy')
         try:
             self._prepare()
@@ -158,6 +172,10 @@ class CompanionRun:
             self.process = subprocess.Popen(self._command(), cwd=self.work / 'tmp', env=env, stdin=subprocess.PIPE,
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         except Exception:
+            # 没起来：撤掉登记、还回名额，不然这个用户会一直显示「正在回复」
+            _unregister(self)
+            capacity.release(self.slot)
+            tokens.revoke(self.token)
             self._cleanup()
             raise
         self.started_at = time.time()
@@ -354,6 +372,7 @@ class CompanionRun:
             self.finished.set()
             _unregister(self)
             self._cleanup()
+            capacity.release(self.slot)   # 放行排队的下一位
         if self.on_after:
             try:
                 with self.app.app_context():

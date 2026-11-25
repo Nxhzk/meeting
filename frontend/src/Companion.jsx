@@ -18,7 +18,7 @@ function fromSnapshot(snap, previous) {
     if (!snap) return null;
     const segments = snap.segments?.length ? snap.segments : [EMPTY_SEGMENT()];
     return { run: snap.run, segments, thinking: Boolean(snap.thinking), stopping: Boolean(snap.stopping), waiting: Boolean(snap.waiting),
-        cut: previous && previous.run === snap.run ? previous.cut : 0 };
+        queue: snap.queue ?? null, cut: previous && previous.run === snap.run ? previous.cut : 0 };
 }
 
 /** 按编号插入（去重、保持顺序）。 */
@@ -122,7 +122,9 @@ export function useCompanion(enabled = true, owner = 'me') {
             on('hello', data => { streaming.current = true; setLive(l => fromSnapshot(data.live, l)); });
             on('bye', () => disconnect());
             on('run', data => {
-                if (data.state === 'start') setLive({ run: data.run, segments: [EMPTY_SEGMENT()], thinking: false, stopping: false, waiting: Boolean(data.waiting), cut: 0 });
+                if (data.state === 'start') setLive({ run: data.run, segments: [EMPTY_SEGMENT()], thinking: false, stopping: false, waiting: Boolean(data.waiting), queue: data.queue ?? null, cut: 0 });
+                // 服务器忙、在排队：更新「前面还有几位」
+                if (data.state === 'queue') setLive(l => (l && l.run === data.run ? { ...l, queue: data.queue ?? null } : l));
                 if (data.state === 'stopping') setLive(l => (sameRun(l, data) ? { ...l, stopping: true } : l));
                 if (data.state === 'end') setLive(l => (!l || !data.run || l.run === data.run ? null : l));
             });
@@ -552,6 +554,8 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
         requestAnimationFrame(() => { resize(); field.current?.focus(); });
     }
 
+    // 回复结束就忘掉「按过停止」：排队状态每次都叫 queued，不清掉下次排队时停止按钮会一直是灰的
+    useEffect(() => { if (!live) setStopAsked(null); }, [live]);
     const stopping = Boolean(live?.stopping) || Boolean(live && stopAsked === live.run);
     async function stop() {
         if (!live || stopping) return;
@@ -646,7 +650,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
                     </div>
                 </motion.div>}
                 {items}
-                <AnimatePresence>{typing && <Typing key="typing" label={toolBusy ? '查资料中' : '正在输入'} />}</AnimatePresence>
+                <AnimatePresence>{typing && <Typing key="typing" label={live?.queue != null ? (live.queue > 0 ? `排队中，前面还有 ${live.queue} 位` : '排队中，马上开始') : toolBusy ? '查资料中' : '正在输入'} />}</AnimatePresence>
             </div>
         </div>
 
@@ -655,7 +659,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
                 onChange={event => { setText(event.target.value); resize(); }}
                 onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />
             <AnimatePresence mode="popLayout" initial={false}>
-                {running && !live.waiting && !text.trim()
+                {running && (!live.waiting || live.queue != null) && !text.trim()
                     ? <motion.button key="stop" type="button" className="composer-btn stop" aria-label={stopping ? '正在停止' : '停止'} onClick={stop} disabled={stopping}
                         initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
                         <Icon name="stop" /></motion.button>
