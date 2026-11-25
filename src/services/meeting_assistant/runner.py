@@ -12,6 +12,7 @@
 import json
 import logging
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -349,24 +350,31 @@ def _execute(command, env, cwd, timeout, parts, report, cancel_requested, trace=
                 del stderr_tail[:-40]
 
     threading.Thread(target=drain_stderr, daemon=True).start()
-    lines = []
+    # 逐行取走、处理完就丢：pi 的每个流式事件都带着到当前为止的整条消息，读原文的工具结果也很大，
+    # 长会议的输出全部留在内存里会到几百 MB（2026-11-25 一场 97 分钟的会把服务撑到内存上限、网页卡死）。
+    lines = queue.SimpleQueue()
     reader_done = threading.Event()
 
     def drain_stdout():
-        for raw in process.stdout:
-            lines.append(raw)
-        reader_done.set()
+        try:
+            for raw in process.stdout:
+                lines.put(raw)
+        finally:
+            reader_done.set()
 
     threading.Thread(target=drain_stdout, daemon=True).start()
     deadline = time.monotonic() + timeout
-    seen = 0
     last_cancel_check = 0.0
     try:
         while True:
-            while seen < len(lines):
-                _handle_event(lines[seen], result, progress, trace)
-                seen += 1
-            if reader_done.is_set() and process.poll() is not None and seen >= len(lines):
+            try:
+                raw = lines.get(timeout=0.1)
+            except queue.Empty:
+                raw = None
+            if raw is not None:
+                _handle_event(raw, result, progress, trace)
+                raw = None
+            elif reader_done.is_set() and process.poll() is not None and lines.empty():
                 break
             now = time.monotonic()
             if now > deadline:
@@ -377,7 +385,6 @@ def _execute(command, env, cwd, timeout, parts, report, cancel_requested, trace=
                 if cancel_requested():
                     _kill(process)
                     raise AssistantCanceled()
-            time.sleep(0.1)
     finally:
         if process.poll() is None:
             _kill(process)
