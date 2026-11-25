@@ -57,15 +57,20 @@ export function Icon({ name, ...rest }) {
 }
 
 // ------------------------------------------------------------ 导航栏（大标题，滚动后收起）
+// 左右滑动时摆在旁边的那一页：页面还没切过去，不跟着当前页面的滚动收起大标题
+export const PeekContext = createContext(false);
+
 export function useScrolled(target, threshold = 24) {
     const [scrolled, setScrolled] = useState(false);
+    const peeking = useContext(PeekContext);
     useEffect(() => {
+        if (peeking) { setScrolled(false); return; }
         const node = target?.current ?? window;
         const read = () => setScrolled((node === window ? window.scrollY : node.scrollTop) > threshold);
         read();
         node.addEventListener('scroll', read, { passive: true });
         return () => node.removeEventListener('scroll', read);
-    }, [target, threshold]);
+    }, [target, threshold, peeking]);
     return scrolled;
 }
 

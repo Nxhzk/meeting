@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { AnimatePresence, LayoutGroup, MotionConfig, animate, motion, useDragControls, useMotionValue, useTransform } from 'motion/react';
 import {
-    Banner, Icon, NavBar, NavButton, Sheet, ToastProvider, clockText, dateText, dayLabel, pushSpring, softSpring, spring,
+    Banner, Icon, NavBar, NavButton, PeekContext, Sheet, ToastProvider, clockText, dateText, dayLabel, pushSpring, softSpring, spring,
     timeFormat, useToast,
 } from './ui.jsx';
 import { MeetingDetail, labels, processing } from './MeetingDetail.jsx';
@@ -131,7 +132,8 @@ function SwipeRow({ children, onDelete, enabled, label }) {
         const open = info.offset.x < -60 || info.velocity.x < -500;
         animate(x, open ? -96 : 0, spring);
     };
-    return <div className="swipe">
+    // data-no-swipe：在能删除的会议上横着滑是拉出删除按钮，不切换页面
+    return <div className="swipe" data-no-swipe>
         <motion.button type="button" className="swipe-action" style={{ opacity: actionOpacity }} aria-label={label}
             onClick={() => { animate(x, 0, spring); onDelete(); }}>
             <span style={{ display: 'grid', justifyItems: 'center', gap: 2 }}><Icon name="trash" />删除</span>
@@ -334,8 +336,9 @@ function Workspace({ config }) {
     const edgeDrag = useDragControls();
     const drawerDrag = useDragControls();
     const slide = useRef(0);   // 切标签的方向：1 从右边进来，-1 从左边，0 不滑
-    const swiped = useRef(false);   // 这次切换是手指滑过去的：新页面整页滑入
     const swipeX = useMotionValue(0);
+    const [peek, setPeek] = useState(null);   // 正在滑动时摆在旁边的那一页：{ step, top }
+    const peekRef = useRef(null);
     const companion = useCompanion(true, config.owner);
     // 小助理是盖在当前页面上的抽屉：底下仍是进来之前的标签页，关掉就回到那里
     const lastTab = useRef('meetings');
@@ -505,11 +508,11 @@ function Workspace({ config }) {
     // 抽屉底下显示的那一页
     const base = showAssistant ? lastTab.current : route.tab;
     const baseDetail = showAssistant ? null : detail;
-    const tabPage = base === 'memory' ? <MemoryPage key="memory" config={config} sub={route.sub}
+    const tabPage = (key, current) => key === 'memory' ? <MemoryPage config={config} sub={current ? route.sub : undefined}
         openMeeting={id => go(`#meeting-${id}`, { tab: 'meetings', detail: id })}
         openHistory={() => go('#memory-history', { tab: 'memory', detail: null, sub: 'history' })}
         closeHistory={() => history.state?.sub === 'history' ? history.back() : go('#memory', { tab: 'memory', detail: null }, true)} />
-        : base === 'settings' ? <SettingsPage key="settings" config={config} locked={actionsLocked} />
+        : key === 'settings' ? <SettingsPage config={config} locked={actionsLocked} />
         : null;
 
     const updateChip = stale && !actionsLocked && mode === 'idle'
@@ -522,58 +525,84 @@ function Workspace({ config }) {
         && !liveId && !deleteTarget;
     const neighbour = step => swipeOrder[swipeOrder.indexOf(route.tab) + step];
     useTabSwipe(canSwipe, {
-        // 两头没有下一页时加阻尼，松手弹回
-        move: dx => swipeX.set(neighbour(dx < 0 ? 1 : -1) ? dx : dx * .25),
+        move: dx => {
+            if (swipeX.isAnimating()) swipeX.stop();
+            const step = dx < 0 ? 1 : -1;
+            const next = neighbour(step);
+            // 手指往哪边滑，就把那边的页面先摆在旁边，和当前页面连在一起被拖进来
+            if (next && peekRef.current?.step !== step) {
+                peekRef.current = { step, top: window.scrollY };
+                setPeek(peekRef.current);
+            }
+            // 两头没有下一页时加阻尼，松手弹回
+            swipeX.set(next ? dx : dx * .25);
+        },
         end: step => {
             const next = step && neighbour(step);
-            if (!next) { animate(swipeX, 0, spring); return; }
-            // 旧页面顺着手势滑出去，新页面从另一边整页滑进来
-            animate(swipeX, -step * window.innerWidth, { type: 'tween', duration: .16, ease: [.3, .7, .4, 1] }).then(() => {
-                swiped.current = true;
-                selectTab(tabs.find(t => t.key === next), step);
+            if (!next) {
+                animate(swipeX, 0, spring).then(() => {
+                    if (Math.abs(swipeX.get()) < 1) { peekRef.current = null; setPeek(null); }
+                });
+                return;
+            }
+            // 两页一起滑到位，然后旁边那页原地变成当前页（同一个组件，不重新加载、不闪）
+            animate(swipeX, -step * window.innerWidth, { type: 'tween', duration: .22, ease: [.25, .8, .35, 1] }).then(() => {
+                flushSync(() => {
+                    selectTab(tabs.find(t => t.key === next), step);
+                    peekRef.current = null;
+                    setPeek(null);
+                });
                 swipeX.set(0);
             });
         },
     });
-    useEffect(() => { slide.current = 0; swiped.current = false; }, [route]);
-    const fade = useTransform(swipeX, x => 1 - Math.min(.35, Math.abs(x) / window.innerWidth * .5));
-    const enterX = slide.current * (swiped.current ? window.innerWidth : 48);
-    const enter = slide.current ? { opacity: swiped.current ? 1 : 0, x: enterX } : { opacity: 0, y: 10 };
-    const enterMotion = slide.current ? { type: 'spring', stiffness: 380, damping: 38, mass: .9 } : { duration: .22, ease: [.3, .7, .4, 1] };
+    useEffect(() => { slide.current = 0; }, [route]);
 
-    return <div className="app" data-tab={base} data-assistant={showAssistant ? 'open' : undefined} data-split={split && base === 'meetings' ? 'true' : undefined}>
-        <motion.div className="swipe-host" style={{ x: swipeX, opacity: fade }}>
-        {base === 'meetings' ? (split ? <div className="split">
-            <div className="split-list">{home}</div>
-            <div className="split-detail">
-                <AnimatePresence mode="wait" initial={false}>
-                    {baseDetail ? <motion.div key={route.detail} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={pushSpring}>
-                        <div className="page-stack" ref={detailScroll}>{detail}</div>
-                    </motion.div> : <motion.div key="empty" className="split-empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                        <div className="empty"><Icon name="doc" /><strong>选择一场会议</strong><p>会议摘要、注意事项和发言原文会显示在这里。</p></div>
-                    </motion.div>}
-                </AnimatePresence>
-            </div>
-        </div> : <>
-            <motion.div initial={slide.current ? enter : false}
-                animate={{ opacity: 1, x: baseDetail ? '-28%' : 0, filter: baseDetail ? 'brightness(.92)' : 'brightness(1)' }} transition={slide.current ? enterMotion : pushSpring}
-                aria-hidden={baseDetail ? true : undefined} style={{ pointerEvents: baseDetail ? 'none' : undefined }}>{home}</motion.div>
-            <AnimatePresence>
-                {baseDetail && <motion.div key={route.detail} className="page-stack" ref={detailScroll}
-                    initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={pushSpring}
-                    // 和 iOS 一样只认从屏幕左边缘开始的滑动：页面里表格、波形的横向滑动不会触发返回
-                    drag="x" dragListener={false} dragControls={edgeDrag} dragDirectionLock
-                    dragConstraints={{ left: 0, right: 0 }} dragElastic={{ left: 0, right: .9 }}
-                    onPointerDown={event => { if (event.pointerType !== 'mouse' && event.clientX <= 24) edgeDrag.start(event); }}
-                    onDragEnd={(_e, info) => { if (info.offset.x > 110 || info.velocity.x > 700) back(); }}>
-                    {detail}
+    const meetingsView = current => split ? <div className="split">
+        <div className="split-list">{home}</div>
+        <div className="split-detail">
+            <AnimatePresence mode="wait" initial={false}>
+                {current && baseDetail ? <motion.div key={route.detail} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }} transition={pushSpring}>
+                    <div className="page-stack" ref={detailScroll}>{detail}</div>
+                </motion.div> : <motion.div key="empty" className="split-empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+                    <div className="empty"><Icon name="doc" /><strong>选择一场会议</strong><p>会议摘要、注意事项和发言原文会显示在这里。</p></div>
                 </motion.div>}
             </AnimatePresence>
-        </>) : <AnimatePresence mode="popLayout" initial={slide.current !== 0}>
-            {/* 旧页面立刻让位（滑动时它已经滑出屏幕），新页面按方向滑进来 */}
-            <motion.div key={base + (route.sub || '')} initial={enter} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, transition: { duration: 0 } }}
-                transition={enterMotion}>{tabPage}</motion.div>
-        </AnimatePresence>}
+        </div>
+    </div> : <>
+        <motion.div initial={false}
+            animate={{ x: current && baseDetail ? '-28%' : 0, filter: current && baseDetail ? 'brightness(.92)' : 'brightness(1)' }} transition={pushSpring}
+            aria-hidden={current && baseDetail ? true : undefined} style={{ pointerEvents: current && baseDetail ? 'none' : undefined }}>{home}</motion.div>
+        <AnimatePresence>
+            {current && baseDetail && <motion.div key={route.detail} className="page-stack" ref={detailScroll}
+                initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={pushSpring}
+                // 和 iOS 一样只认从屏幕左边缘开始的滑动：页面里表格、波形的横向滑动不会触发返回
+                drag="x" dragListener={false} dragControls={edgeDrag} dragDirectionLock
+                dragConstraints={{ left: 0, right: 0 }} dragElastic={{ left: 0, right: .9 }}
+                onPointerDown={event => { if (event.pointerType !== 'mouse' && event.clientX <= 24) edgeDrag.start(event); }}
+                onDragEnd={(_e, info) => { if (info.offset.x > 110 || info.velocity.x > 700) back(); }}>
+                {detail}
+            </motion.div>}
+        </AnimatePresence>
+    </>;
+    const paneContent = (key, current) => key === 'meetings' ? meetingsView(current) : tabPage(key, current);
+    const peekKey = canSwipe && peek ? neighbour(peek.step) : null;
+    const panes = swipeOrder.filter(key => key === base || key === peekKey);
+    if (!panes.includes(base)) panes.push(base);
+
+    return <div className="app" data-tab={base} data-assistant={showAssistant ? 'open' : undefined} data-split={split && base === 'meetings' ? 'true' : undefined}>
+        <motion.div className="swipe-host" style={{ x: swipeX }}>
+            {panes.map(key => {
+                const current = key === base;
+                // 点标签栏切换：新页面按方向轻轻滑进来；手指滑过来的页面已经在位，不再动
+                return <motion.div key={current ? key + (route.sub || '') : key} className={current ? 'tab-pane' : 'tab-pane peek'}
+                    initial={current && slide.current ? { opacity: 0, x: slide.current * 48 } : false} animate={{ opacity: 1, x: 0 }}
+                    transition={{ type: 'spring', stiffness: 380, damping: 38, mass: .9 }}
+                    style={current ? undefined : { top: peek.top, left: `${peek.step * 100}%` }}
+                    aria-hidden={current ? undefined : true}>
+                    <PeekContext.Provider value={!current}>{paneContent(key, current)}</PeekContext.Provider>
+                </motion.div>;
+            })}
         </motion.div>
         <AnimatePresence>{updateChip}</AnimatePresence>
         {/* 小助理：从底部拉起的抽屉，盖在当前页面上；往下拖顶部、点上面露出的部分或按返回都能关 */}

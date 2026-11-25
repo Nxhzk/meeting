@@ -724,3 +724,6 @@ button.row:not(:disabled):active, a.row:active { background: var(--card-2); }
     font-size: 14px; color: var(--label); clip-path: inset(0 round 999px); }
 .update-chip svg { width: 16px; height: 16px; color: var(--tint); }
 .update-chip strong { color: var(--tint); font-weight: 650; margin-left: 2px; }
+/* 左右滑动切换标签：旁边那页摆在当前页左右两侧，一起被拖动 */
+.swipe-host { position: relative; }
+.tab-pane.peek { position: absolute; width: 100%; pointer-events: none; }
