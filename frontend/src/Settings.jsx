@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Icon, NavBar, Sheet } from './ui.jsx';
 import { currentCsrf } from './recording/api.js';
+import { JstAvatar } from './JstMark.jsx';
 
 const meetingApp = /JstMeetingApp\//.test(navigator.userAgent);
 
@@ -24,8 +25,8 @@ export function SettingsPage({ config, locked }) {
         <div className="content">
             <section className="section">
                 <div className="group profile">
-                    <span className="profile-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>
-                    <span><strong>{name}</strong><small>{profile.email}</small></span>
+                    <JstAvatar size={58} className="profile-avatar" />
+                    <span><strong>{name}</strong><small>@捷士通个人用户</small></span>
                 </div>
             </section>
             <section className="section">

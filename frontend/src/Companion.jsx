@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { AnimatePresence, animate, motion, useMotionValue, useTransform } from 'motion/react';
 import { Icon, Menu, MenuItem, NavButton, Sheet, dayLabel, softSpring, spring, timeFormat, useToast } from './ui.jsx';
 import { chunkHtml, completedChunks, splitReply, typingDelay } from './chat-format.js';
-import { LiquidOrb } from './LiquidOrb.jsx';
+import { LiquidMark } from './LiquidOrb.jsx';
 import { apiUrl, request } from './recording/api.js';
 
 /* 小助理：和用户的一条连续对话。
@@ -322,7 +322,7 @@ function ToolLine({ tools }) {
 function Typing({ label }) {
     return <motion.div className="msg" data-mine="false" initial={{ opacity: 0, y: 10, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, scale: .96 }} transition={softSpring}>
-        <div className="bubble live"><span className="thinking"><LiquidOrb size={26} energy={.9} /><span>{label}</span></span></div>
+        <div className="bubble live"><span className="thinking"><LiquidMark size={26} energy={.9} /><span>{label}</span></span></div>
     </motion.div>;
 }
 
@@ -626,7 +626,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
             {onGrab && <span className="drawer-grabber" aria-hidden="true" />}
             <div className="companion-title">
                 <NavButton icon="back" label="返回" onClick={onBack} />
-                <LiquidOrb size={34} energy={running ? .9 : .3} />
+                <LiquidMark size={34} energy={running ? .9 : .3} />
                 <div><strong>小助理</strong><small>{stopping ? '正在停止…' : running || pending ? '正在回复…' : '记得你所有的会'}</small></div>
             </div>
             <div className="companion-actions">
@@ -642,7 +642,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
             <div className="companion-list">
                 {companion.more != null && <button type="button" className="btn btn-gray btn-small older" onClick={companion.loadOlder}>更早的消息</button>}
                 {loaded && !messages.length && !live && !outbox.length && <motion.div className="companion-empty" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={softSpring}>
-                    <LiquidOrb size={96} energy={.4} />
+                    <LiquidMark size={96} energy={.4} />
                     <strong>有什么要我帮忙的？</strong>
                     <p>我能查你所有会议的结论、待办和原话，帮你记住习惯，到点提醒你。</p>
                     <div className="suggestions">

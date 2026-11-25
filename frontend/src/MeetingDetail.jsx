@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
     Banner, Icon, Menu, MenuItem, NavBar, NavButton, Sheet, clockText, copyText, dateText, durationText, relativeTime,
-    softSpring, speakerColor, useToast,
+    softSpring, useToast,
 } from './ui.jsx';
 import { request } from './recording/api.js';
 import { LiquidOrb } from './LiquidOrb.jsx';
 import { Player } from './Player.jsx';
 import { AgentTrace, currentActivity } from './AgentTrace.jsx';
+import { JstAvatar } from './JstMark.jsx';
 
 export const labels = {
     saving: '正在保存', waiting: '等待整理', transcribing: '正在转写', summarizing: '正在生成摘要',
@@ -178,7 +179,7 @@ function Transcript({ lines }) {
                         {lines.slice(0, limit).map((line, index) => {
                             const name = line.speaker || '发言';
                             return <div className="utterance" key={index}>
-                                <span className="avatar" style={{ background: speakerColor(name) }} aria-hidden="true">{name.replace(/^发言人\s*/, '').slice(0, 2)}</span>
+                                <JstAvatar size={34} className="avatar" />
                                 <div>
                                     <div className="utterance-head">{line.speaker && <strong>{line.speaker}</strong>}{line.start != null && <span>{clockText(line.start)}</span>}</div>
                                     <p>{line.text}</p>

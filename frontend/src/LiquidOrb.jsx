@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { JstMark } from './JstMark.jsx';
 
 /* 液态球体：WebGL 片元着色器。
    3D simplex 噪声做表面起伏（边缘随时间流动），内部用两层域扭曲（domain
@@ -11,7 +12,7 @@ attribute vec2 p;
 varying vec2 uv;
 void main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }`;
 
-const FRAGMENT = `
+const NOISE = `
 precision highp float;
 varying vec2 uv;
 uniform float t;
@@ -67,6 +68,9 @@ float fbm(vec3 p) {
   return v;
 }
 
+`;
+
+const FRAGMENT = NOISE + `
 mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
 
 void main() {
@@ -128,6 +132,96 @@ void main() {
   gl_FragColor = vec4(outCol * alpha, alpha);   // 预乘 alpha
 }`;
 
+
+/* 捷士通标志形状的液态标记：两块的形状用多边形距离场算出来（顶点和 JstMark 一致），
+   再用噪声让边缘缓慢流动、两块在靠近处像液体一样时而相连；内部是流动的蓝 / 红液体，
+   带斜面高光和边缘光。energy 越高流得越快、起伏越大、两块越容易连在一起。 */
+const MARK_FRAGMENT = NOISE + `
+uniform float px;   // 一个像素在标志坐标里的大小
+
+float sdPoly(vec2 p, vec2 v0, vec2 v1, vec2 v2, vec2 v3, vec2 v4, vec2 v5, vec2 v6, vec2 v7) {
+  vec2 v[8];
+  v[0] = v0; v[1] = v1; v[2] = v2; v[3] = v3; v[4] = v4; v[5] = v5; v[6] = v6; v[7] = v7;
+  float d = dot(p - v[0], p - v[0]);
+  float s = 1.0;
+  vec2 prev = v[7];
+  for (int i = 0; i < 8; i++) {
+    vec2 cur = v[i];
+    vec2 e = prev - cur;
+    vec2 w = p - cur;
+    vec2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0, 1.0);
+    d = min(d, dot(b, b));
+    bvec3 c = bvec3(p.y >= cur.y, p.y < prev.y, e.x * w.y > e.y * w.x);
+    if (all(c) || all(not(c))) s *= -1.0;
+    prev = cur;
+  }
+  return s * sqrt(d);
+}
+
+float sdBlue(vec2 p) {
+  return sdPoly(p, vec2(20.0, 80.0), vec2(20.0, 18.0), vec2(53.0, 0.0), vec2(86.0, 18.0),
+                   vec2(70.0, 27.0), vec2(53.0, 17.5), vec2(38.0, 27.0), vec2(38.0, 74.0));
+}
+float sdRed(vec2 p) { return sdBlue(vec2(106.0, 104.0) - p); }
+
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+void main() {
+  float speed = 0.35 + energy * 0.65;
+  vec2 P = vec2(53.0 + uv.x * 62.0, 52.0 - uv.y * 62.0);
+
+  // 边缘流动：低频噪声把采样点推来推去
+  float amp = 0.55 + energy * 0.75;
+  vec2 flow = vec2(snoise(vec3(P * 0.028, t * 0.22 * speed)), snoise(vec3(P * 0.028 + 7.3, t * 0.22 * speed)));
+  vec2 Q = P + flow * amp;
+
+  float k = 0.4 + energy * 0.8 + 0.9 * max(0.0, sin(t * 0.55 * speed));
+  float round_ = 0.7;
+  float dB = sdBlue(Q) - round_;
+  float dR = sdRed(Q) - round_;
+  float d = smin(dB, dR, k);
+
+  // 斜面：用距离场的梯度当法线，边缘一圈鼓起来像液体表面
+  vec2 e = vec2(0.6, 0.0);
+  float dx = smin(sdBlue(Q + e.xy) - round_, sdRed(Q + e.xy) - round_, k) - d;
+  float dy = smin(sdBlue(Q + e.yx) - round_, sdRed(Q + e.yx) - round_, k) - d;
+  float bevel = smoothstep(0.0, 5.0, -d);
+  vec3 n = normalize(vec3(vec2(dx, -dy) / e.x * (1.0 - bevel), 0.55 + bevel));
+
+  // 颜色：离蓝色那块近就是蓝色液体，离红色近就是红色；连在一起的地方自然过渡
+  float red = smoothstep(-3.0, 3.0, dB - dR);
+  vec3 sp = vec3(P * 0.016, 0.0);
+  float tt = t * 0.16 * speed;
+  vec3 w1 = vec3(fbm(sp + vec3(0.0, 0.0, tt)), fbm(sp + vec3(5.2, 1.3, tt)), 0.0);
+  float f = fbm(sp * 1.2 + 1.4 * w1 + vec3(0.0, 0.0, tt * 0.7));
+  float kf = clamp(f * 0.9 + 0.5, 0.0, 1.0);
+  vec3 blue = mix(vec3(0.05, 0.26, 0.62), vec3(0.16, 0.50, 1.0), smoothstep(0.2, 0.85, kf));
+  blue = mix(blue, vec3(0.45, 0.80, 1.0), smoothstep(0.75, 1.0, kf) * 0.5);
+  vec3 redc = mix(vec3(0.80, 0.17, 0.20), vec3(1.0, 0.36, 0.33), smoothstep(0.2, 0.85, kf));
+  redc = mix(redc, vec3(1.0, 0.62, 0.45), smoothstep(0.75, 1.0, kf) * 0.5);
+  vec3 col = mix(blue, redc, red);
+  float bands = smoothstep(0.5, 0.0, abs(sin((f + w1.x) * 3.0 + t * 0.4 * speed)));
+  col = mix(col, vec3(1.0), bands * (0.05 + energy * 0.05));
+
+  // 光：缓慢转动的主高光 + 边缘光
+  float la = t * 0.25 * speed;
+  vec3 light = normalize(vec3(-0.5 + 0.25 * sin(la), 0.6 + 0.2 * cos(la), 0.7));
+  float diff = 0.78 + 0.32 * dot(n, light);
+  col *= diff;
+  col += pow(max(dot(n, light), 0.0), 28.0) * 0.55;
+  col += pow(1.0 - n.z, 2.0) * mix(vec3(0.55, 0.75, 1.0), vec3(1.0, 0.7, 0.7), red) * 0.35;
+
+  float body = smoothstep(px, -px, d);
+  float glow = exp(-max(d, 0.0) * 0.22) * (1.0 - body) * (0.22 + energy * 0.25);
+  vec3 glowCol = mix(vec3(0.20, 0.45, 1.0), vec3(1.0, 0.35, 0.35), red);
+  float alpha = max(body, glow * smoothstep(1.0, 0.85, max(abs(uv.x), abs(uv.y))));
+  vec3 outCol = mix(glowCol, col, body);
+  gl_FragColor = vec4(outCol * alpha, alpha);
+}`;
+
 function compile(gl, type, source) {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, source);
@@ -136,25 +230,27 @@ function compile(gl, type, source) {
     return shader;
 }
 
-export function LiquidOrb({ size = 72, energy = 0.5, label }) {
+export function LiquidOrb({ size = 72, energy = 0.5, label, shape = 'orb' }) {
     const canvas = useRef(null);
     const target = useRef(energy);
     const fallback = useRef(false);
+    const [flat, setFlat] = useState(false);   // 没有 WebGL：标志形状退回静态矢量标志
     target.current = energy;
 
     useEffect(() => {
         const node = canvas.current;
         const gl = node.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: true });
-        if (!gl) { fallback.current = true; node.dataset.fallback = 'true'; return; }
+        if (!gl) { fallback.current = true; node.dataset.fallback = 'true'; setFlat(true); return; }
         let program;
         try {
             program = gl.createProgram();
             gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX));
-            gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
+            gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, shape === 'mark' ? MARK_FRAGMENT : FRAGMENT));
             gl.linkProgram(program);
             if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
         } catch {
             node.dataset.fallback = 'true';
+            setFlat(true);
             return;
         }
         gl.useProgram(program);
@@ -173,6 +269,7 @@ export function LiquidOrb({ size = 72, energy = 0.5, label }) {
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         node.width = node.height = Math.round(size * dpr);
         gl.viewport(0, 0, node.width, node.height);
+        if (shape === 'mark') gl.uniform1f(gl.getUniformLocation(program, 'px'), 124 / node.width * 1.2);
 
         const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
         let frame = 0;
@@ -207,9 +304,14 @@ export function LiquidOrb({ size = 72, energy = 0.5, label }) {
             document.removeEventListener('visibilitychange', resume);
             gl.getExtension('WEBGL_lose_context')?.loseContext();
         };
-    }, [size]);
+    }, [size, shape]);
 
     return <span className="liquid-orb" style={{ width: size, height: size }} role={label ? 'img' : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
-        <canvas ref={canvas} style={{ width: size, height: size }} />
+        {flat && shape === 'mark' ? <JstMark size={Math.round(size * .9)} /> : <canvas ref={canvas} style={{ width: size, height: size }} />}
     </span>;
+}
+
+/** 小助理的标记：捷士通标志形状的液态动画。 */
+export function LiquidMark(props) {
+    return <LiquidOrb {...props} shape="mark" />;
 }
