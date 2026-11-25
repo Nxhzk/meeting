@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { AnimatePresence, LayoutGroup, MotionConfig, animate, motion, useDragControls, useMotionValue, useTransform } from 'motion/react';
 import {
-    Banner, Icon, NavBar, NavButton, PeekContext, Sheet, ToastProvider, clockText, dateText, dayLabel, pushSpring, softSpring, spring,
+    Banner, Icon, NavBar, NavButton, PeekContext, Sheet, useBackClose, ToastProvider, clockText, dateText, dayLabel, pushSpring, softSpring, spring,
     timeFormat, useToast,
 } from './ui.jsx';
 import { MeetingDetail, labels, processing } from './MeetingDetail.jsx';
@@ -127,15 +127,19 @@ function RecordingDock({ mode, startedAt, notice, meter, action, disabled, low }
 function SwipeRow({ children, onDelete, enabled, label }) {
     const x = useMotionValue(0);
     const actionOpacity = useTransform(x, [-96, -30, 0], [1, .4, 0]);
+    const [revealed, setRevealed] = useState(false);
+    // 拉出了删除按钮：按返回键先把它收回去
+    useBackClose(enabled && revealed, () => { animate(x, 0, spring); setRevealed(false); });
     if (!enabled) return children(null);
     const settle = (_e, info) => {
         const open = info.offset.x < -60 || info.velocity.x < -500;
         animate(x, open ? -96 : 0, spring);
+        setRevealed(open);
     };
     // data-no-swipe：在能删除的会议上横着滑是拉出删除按钮，不切换页面
     return <div className="swipe" data-no-swipe>
         <motion.button type="button" className="swipe-action" style={{ opacity: actionOpacity }} aria-label={label}
-            onClick={() => { animate(x, 0, spring); onDelete(); }}>
+            onClick={() => { animate(x, 0, spring); setRevealed(false); onDelete(); }}>
             <span style={{ display: 'grid', justifyItems: 'center', gap: 2 }}><Icon name="trash" />删除</span>
         </motion.button>
         {children({ drag: 'x', style: { x }, dragConstraints: { left: -96, right: 0 }, dragElastic: { left: .2, right: 0 },

@@ -103,6 +103,32 @@ export function NavButton({ icon, label, children, glass = false, ...rest }) {
 }
 
 // ------------------------------------------------------------ 底部面板（可下拉关闭）
+// ------------------------------------------------------------ 系统返回键
+// 安卓壳按返回键时先调 window.__jstBack()：页面上有打开的面板、菜单、拉出的删除按钮，就先关最上面那一个，
+// 返回 true；什么都没开才返回 false，由壳去做页面后退（关小助理、退出会议详情）或退到后台。
+const backStack = [];
+window.__jstBack = () => {
+    const top = backStack.at(-1);
+    if (!top) return false;
+    top.close();
+    return true;
+};
+
+/** open 期间登记到返回栈：按返回键时调用 close。后打开的先关。 */
+export function useBackClose(open, close) {
+    const latest = useRef(close);
+    latest.current = close;
+    useEffect(() => {
+        if (!open) return;
+        const entry = { close: () => latest.current() };
+        backStack.push(entry);
+        return () => {
+            const index = backStack.lastIndexOf(entry);
+            if (index >= 0) backStack.splice(index, 1);
+        };
+    }, [open]);
+}
+
 export function Sheet({ open, onClose, title, busy = false, children, actions, labelledBy }) {
     const dialog = useRef(null);
     const drag = useDragControls();
@@ -113,6 +139,7 @@ export function Sheet({ open, onClose, title, busy = false, children, actions, l
         if (open && !node.open) node.showModal();
     }, [open]);
     const close = () => { if (!busy) onClose(); };
+    useBackClose(open, close);   // 正在提交（busy）时按返回键：面板不关，也不退出软件
     return <AnimatePresence onExitComplete={() => dialog.current?.open && dialog.current.close()}>
         {open && <dialog key="sheet" ref={dialog} className="sheet-dialog" aria-labelledby={labelledBy || headingId}
             onCancel={event => { event.preventDefault(); close(); }}>
@@ -139,6 +166,7 @@ export function Sheet({ open, onClose, title, busy = false, children, actions, l
 // ------------------------------------------------------------ 弹出菜单
 export function Menu({ anchor, open, onClose, children, label }) {
     const [place, setPlace] = useState(null);
+    useBackClose(open, onClose);
     useLayoutEffect(() => {
         if (!open || !anchor?.current) return;
         const rect = anchor.current.getBoundingClientRect();

@@ -83,8 +83,13 @@ class MainActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (!recordingBusy() && web.canGoBack()) web.goBack()
-                else moveTaskToBack(true) // Never close the page mid-meeting.
+                // 先问网页：开着面板、菜单、拉出的删除按钮时，返回键只关它（录音中也可以关）；
+                // 网页说没有可关的，才做页面后退或退到后台。旧版网页没有 __jstBack，按原来的逻辑走。
+                web.evaluateJavascript("(window.__jstBack && window.__jstBack()) ? 1 : 0") { handled ->
+                    if (handled == "1") return@evaluateJavascript
+                    if (!recordingBusy() && web.canGoBack()) web.goBack()
+                    else moveTaskToBack(true) // Never close the page mid-meeting.
+                }
             }
         })
 
