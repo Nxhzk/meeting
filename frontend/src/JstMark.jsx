@@ -42,3 +42,22 @@ export function JstAvatar({ size = 34, className = '' }) {
         <JstMark size={Math.round(size * .62)} />
     </span>;
 }
+
+/* 加载动画：捷士通标志「拼装」。蓝色那块从左上、红色那块从右下一边画出来一边飞进来，
+   在中间咬合时轻轻一弹，右上角的网点逐个亮起；停一下再各自散开，循环。
+   形状是标志的简化版（圆角粗线条），两块之间留着标志特有的两处缺口，小尺寸也清楚。
+   tone：brand 品牌色（页面里）；current 跟随文字颜色（按钮里）。 */
+export function JstLoader({ size = 28, tone = 'brand', label }) {
+    return <span className="jst-loader" data-tone={tone} style={{ width: size, height: size }}
+        role={label ? 'status' : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
+        <svg viewBox="0 0 106 104" width={size} height={size}>
+            <g className="jst-loader-body">
+                <path className="jst-loader-piece blue" pathLength="100" d="M30 64 V24 L53 11 L74 23" />
+                <path className="jst-loader-piece red" pathLength="100" d="M76 40 V80 L53 93 L32 81" />
+                <g className="jst-loader-dots">
+                    <circle cx="86" cy="32" r="3.4" /><circle cx="93" cy="25" r="2.5" /><circle cx="99" cy="19" r="1.8" />
+                </g>
+            </g>
+        </svg>
+    </span>;
+}

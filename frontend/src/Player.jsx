@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Icon, clockText, speakerColor, spring } from './ui.jsx';
 import { apiUrl } from './recording/api.js';
+import { JstLoader } from './JstMark.jsx';
 
 /* 录音播放器：真实波形（后端 /audio/<id>/peaks）、拖动/点击定位、
    ±15 秒、倍速、下载。<audio> 只做解码，界面全部自绘。 */
@@ -402,7 +403,7 @@ export function Player({ src, recordingId, fallbackDuration, lines }) {
                     <motion.span key={waiting && playing ? 'w' : playing ? 'p' : 'r'} className="play-icon"
                         initial={{ scale: .4, opacity: 0, rotate: -40 }} animate={{ scale: 1, opacity: 1, rotate: 0 }}
                         exit={{ scale: .4, opacity: 0, rotate: 40 }} transition={spring}>
-                        {waiting && playing ? <span className="spinner light" /> : <Icon name={playing ? 'pauseSolid' : 'play'} />}
+                        {waiting && playing ? <JstLoader size={22} tone="current" /> : <Icon name={playing ? 'pauseSolid' : 'play'} />}
                     </motion.span>
                 </AnimatePresence>
             </motion.button>

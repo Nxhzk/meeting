@@ -13,6 +13,7 @@ import { useMeetings } from './useMeetings.js';
 import { apiUrl, request } from './recording/api.js';
 import { MeetingCapture } from './recording/register-capture.js';
 import { MicrophoneMeter, meterLabels } from './recording/mic-meter.js';
+import { JstLoader } from './JstMark.jsx';
 
 const busyPhases = new Set(['opening', 'recording', 'paused', 'saving']);
 export const inProgress = phase => busyPhases.has(phase) || ['restoring', 'retry', 'recover'].includes(phase);
@@ -110,7 +111,7 @@ function RecordingDock({ mode, startedAt, notice, meter, action, disabled, low }
                 <motion.button layout id="meeting-action" className="meeting-action" type="button" disabled={disabled} onClick={action}
                     whileTap={{ scale: .95 }} transition={softSpring}>
                     {mode === 'recording' ? <Icon name="stop" /> : ['idle', 'paused'].includes(mode) ? <Icon name="mic" />
-                        : ['saving', 'opening', 'restoring'].includes(mode) ? <span className="spinner" aria-hidden="true" /> : null}
+                        : ['saving', 'opening', 'restoring'].includes(mode) ? <JstLoader size={22} tone="current" /> : null}
                     {actions[mode]}
                 </motion.button>
             </motion.div>
@@ -216,7 +217,7 @@ function MeetingsHome({ library, loginUrl, current, openLive, openDetail, openDe
             {data.error === 'login' ? <div className="empty"><Icon name="person" /><strong>登录已失效</strong><p><a href={loginUrl}>重新登录</a>后查看会议。</p></div>
                 : data.error === 'network' && !data.cards.length ? <div className="empty"><Icon name="warning" /><strong>无法加载会议</strong><p>请检查网络。</p>
                     <button className="btn btn-gray btn-small" type="button" id="list-refresh" disabled={loading} onClick={() => load()}>重新加载</button></div>
-                : !data.loaded ? <div className="center"><span className="spinner" aria-label="正在加载" /></div>
+                : !data.loaded ? <div className="center"><JstLoader size={40} label="正在加载" /></div>
                 : !data.cards.length && !others.length ? <div className="empty"><Icon name="waveform" /><strong>还没有会议</strong><p>点下方「开始会议」录音，结束后会自动整理出会议摘要和注意事项。</p></div>
                 : <LayoutGroup>
                     <MeetingRows cards={data.cards} current={current} openDetail={openDetail} canDelete={data.canDelete}

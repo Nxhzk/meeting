@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Banner, Icon, NavBar, NavButton, Segmented, Sheet, Toggle, relativeTime, softSpring, useToast } from './ui.jsx';
 import { request } from './recording/api.js';
+import { JstLoader } from './JstMark.jsx';
 
 const categoryIcons = { person: 'person', project: 'folder', recurring_issue: 'warning', preference: 'heart' };
 const actionText = { add: '新增', update: '修改', delete: '删除', restore: '恢复', pin: '设为始终记住', unpin: '取消始终记住' };
@@ -103,7 +104,7 @@ function History({ close, openMeeting }) {
         <NavBar title="变更记录" subtitle="会议助手、小助理、记忆整理和你对长期记忆的每一次改动" left={<NavButton icon="back" label="返回记忆" onClick={close}>记忆</NavButton>} />
         <div className="content">
             {error && <Banner tone="warn">暂时无法加载变更记录。</Banner>}
-            {!events && !error && <div className="center"><span className="spinner" /></div>}
+            {!events && !error && <div className="center"><JstLoader size={40} label="正在加载" /></div>}
             {events && !events.length && <div className="empty"><Icon name="history" /><strong>还没有改动</strong></div>}
             {events?.length > 0 && <section className="section"><ul className="group timeline">
                 {events.map(event => <motion.li key={event.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
@@ -168,7 +169,7 @@ function Consolidation({ info, reload }) {
                         : lastLine || `超过 ${info.threshold_chars.toLocaleString()} 字或 ${info.threshold_entries} 条时自动整理`}</span></span>
                 </span>
                 <button type="button" className="btn btn-gray btn-small" disabled={running || info.count < 2} onClick={start}>
-                    {running ? <span className="spinner" /> : '立即整理'}</button>
+                    {running ? <JstLoader size={20} tone="current" /> : '立即整理'}</button>
             </div>
         </div>
         <p className="section-foot">整理的每一步都在「变更记录」里，删掉的可以恢复；「始终记住」的条目不会被改动。</p>
@@ -204,7 +205,7 @@ export function MemoryPage({ config, sub, openMeeting, openHistory, closeHistory
         <div className="content">
             {state.error === 'login' && <Banner tone="bad" title="登录已失效"><a href={config.loginUrl}>重新登录</a>后查看。</Banner>}
             {state.error === 'network' && <Banner tone="warn">网络不稳定，<button type="button" className="source-link" onClick={load}>重试</button></Banner>}
-            {!state.loaded && <div className="center"><span className="spinner" aria-label="正在加载" /></div>}
+            {!state.loaded && <div className="center"><JstLoader size={40} label="正在加载" /></div>}
             {state.loaded && !visible.length && !state.error && <div className="empty">
                 <Icon name="brain" />
                 <strong>{filter === 'all' ? '还没有长期记忆' : '这个分类还没有记忆'}</strong>

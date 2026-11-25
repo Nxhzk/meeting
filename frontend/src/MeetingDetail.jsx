@@ -8,7 +8,7 @@ import { request } from './recording/api.js';
 import { LiquidOrb } from './LiquidOrb.jsx';
 import { Player } from './Player.jsx';
 import { AgentTrace, currentActivity } from './AgentTrace.jsx';
-import { JstAvatar } from './JstMark.jsx';
+import { JstAvatar, JstLoader } from './JstMark.jsx';
 
 export const labels = {
     saving: '正在保存', waiting: '等待整理', transcribing: '正在转写', summarizing: '正在生成摘要',
@@ -204,7 +204,7 @@ function RegenerateSheet({ open, onClose, onSubmit, sending, error }) {
     const suggestions = ['注意事项写得更具体', '下一步补全负责人和时间', '纪要再精简一些', '补充遗漏的讨论'];
     return <Sheet open={open} onClose={onClose} busy={sending} title="重新生成摘要"
         actions={<button className="btn btn-primary btn-block" type="button" disabled={sending} onClick={() => onSubmit(text.trim())}>
-            {sending ? <span className="spinner" aria-hidden="true" /> : <Icon name="sparkles" />}{sending ? '正在提交…' : '重新生成'}
+            {sending ? <JstLoader size={18} tone="current" /> : <Icon name="sparkles" />}{sending ? '正在提交…' : '重新生成'}
         </button>}>
         <p>会议助手会带着上一版的完整上下文接着改，并重新对照长期记忆。每次结果都保留为一个版本。</p>
         <div className="field">
@@ -346,7 +346,7 @@ export function MeetingDetail({ id, title, back, backLabel = '会议', loginUrl,
             {error === 'login' && <Banner tone="bad" title="登录已失效"><a href={loginUrl}>重新登录</a>后查看。</Banner>}
             {error === 'gone' && <Banner tone="warn" title="这场会议找不到了">它可能已被删除。</Banner>}
             {error === 'network' && <Banner tone="warn">网络不稳定，正在重试…</Banner>}
-            {!meeting && !error && <div className="center"><span className="spinner" aria-label="正在加载" /></div>}
+            {!meeting && !error && <div className="center"><JstLoader size={40} label="正在加载" /></div>}
 
             {meeting && <>
                 <AudioCard key={meeting.audio_url} src={meeting.audio_url} showMissing={!busy} recordingId={id} duration={meeting.duration} lines={meeting.transcript} />

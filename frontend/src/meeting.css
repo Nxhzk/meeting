@@ -730,3 +730,54 @@ button.row:not(:disabled):active, a.row:active { background: var(--card-2); }
 /* 左右滑动切换标签：旁边那页摆在当前页左右两侧，一起被拖动 */
 .swipe-host { position: relative; }
 .tab-pane.peek { position: absolute; width: 100%; pointer-events: none; }
+
+/* ------------------------------------------------------------ 加载动画：捷士通标志拼装（JstLoader） */
+.jst-loader { display: inline-grid; place-items: center; flex: none; vertical-align: middle; }
+.jst-loader svg { display: block; overflow: visible; }
+.jst-loader-piece { fill: none; stroke-width: 13; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 100 100; }
+.jst-loader-piece.blue { stroke: #1d5fc4; animation: jst-blue 1.8s cubic-bezier(.6, 0, .25, 1) infinite; }
+.jst-loader-piece.red { stroke: #ec4f4c; animation: jst-red 1.8s cubic-bezier(.6, 0, .25, 1) infinite; }
+.jst-loader-dots circle { fill: #ec4f4c; transform-box: fill-box; transform-origin: center; animation: jst-dot 1.8s ease-out infinite both; }
+.jst-loader-dots circle:nth-child(2) { animation-delay: .07s; }
+.jst-loader-dots circle:nth-child(3) { animation-delay: .14s; }
+.jst-loader-body { transform-origin: 53px 52px; animation: jst-snap 1.8s cubic-bezier(.3, 1.6, .5, 1) infinite; }
+.jst-loader[data-tone='current'] .jst-loader-piece { stroke: currentColor; }
+.jst-loader[data-tone='current'] .jst-loader-piece.red { opacity: .72; }
+.jst-loader[data-tone='current'] .jst-loader-dots circle { fill: currentColor; }
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) .jst-loader[data-tone='brand'] .jst-loader-piece.blue { stroke: #3b82f6; }
+}
+:root[data-theme='dark'] .jst-loader[data-tone='brand'] .jst-loader-piece.blue { stroke: #3b82f6; }
+
+/* 一圈 1.8 秒：0–34% 画出来并飞进来，34–42% 咬合回弹，42–74% 停住（网点亮起），74–100% 散开淡出 */
+@keyframes jst-blue {
+    0% { stroke-dashoffset: 100; transform: translate(-16px, -16px); opacity: 0; }
+    8% { opacity: 1; }
+    34% { stroke-dashoffset: 0; transform: translate(0, 0); }
+    74% { stroke-dashoffset: 0; transform: translate(0, 0); opacity: 1; }
+    100% { stroke-dashoffset: -100; transform: translate(-10px, -10px); opacity: 0; }
+}
+@keyframes jst-red {
+    0%, 6% { stroke-dashoffset: 100; transform: translate(16px, 16px); opacity: 0; }
+    14% { opacity: 1; }
+    38% { stroke-dashoffset: 0; transform: translate(0, 0); }
+    76% { stroke-dashoffset: 0; transform: translate(0, 0); opacity: 1; }
+    100% { stroke-dashoffset: -100; transform: translate(10px, 10px); opacity: 0; }
+}
+@keyframes jst-snap {
+    0%, 36% { transform: scale(1); }
+    42% { transform: scale(.9); }
+    50%, 100% { transform: scale(1); }
+}
+@keyframes jst-dot {
+    0%, 42% { transform: scale(0); opacity: 0; }
+    52% { transform: scale(1.25); opacity: 1; }
+    60%, 72% { transform: scale(1); opacity: 1; }
+    86%, 100% { transform: scale(0); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .jst-loader-piece, .jst-loader-dots circle, .jst-loader-body { animation: none; }
+    .jst-loader-piece { stroke-dashoffset: 0; }
+    .jst-loader svg { animation: jst-breathe 1.6s ease-in-out infinite; }
+}
+@keyframes jst-breathe { 50% { opacity: .45; } }
