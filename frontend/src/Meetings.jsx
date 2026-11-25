@@ -266,9 +266,9 @@ function scrollsSideways(node) {
     return false;
 }
 
-function useTabSwipe(enabled, { move: onMove, end: onEnd }) {
+function useTabSwipe(enabled, { begin: onBegin, move: onMove, end: onEnd }) {
     const handler = useRef({ onMove, onEnd });
-    handler.current = { onMove, onEnd };
+    handler.current = { onBegin, onMove, onEnd };
     useEffect(() => {
         if (!enabled) return;
         let start = null;
@@ -281,6 +281,7 @@ function useTabSwipe(enabled, { move: onMove, end: onEnd }) {
             if (!target || target.closest('input, textarea, select, [contenteditable], dialog, .dock, [data-no-swipe]')) return;
             if (scrollsSideways(target)) return;
             start = { x: touch.clientX, y: touch.clientY, t: performance.now(), lock: null };
+            handler.current.onBegin();
         };
         const move = event => {
             if (!start) return;
@@ -341,6 +342,8 @@ function Workspace({ config }) {
     const swipeX = useMotionValue(0);
     const [peek, setPeek] = useState(null);   // 正在滑动时摆在旁边的那一页：{ step, top }
     const peekRef = useRef(null);
+    const commitRef = useRef(null);   // 正在放的翻页动画：{ next, step, anim }
+    const dragBase = useRef(0);       // 这次拖动开始时页面已经偏移的距离
     const companion = useCompanion(true, config.owner);
     // 小助理是盖在当前页面上的抽屉：底下仍是进来之前的标签页，关掉就回到那里
     const lastTab = useRef('meetings');
@@ -526,9 +529,28 @@ function Workspace({ config }) {
     const canSwipe = !showAssistant && swipeOrder.includes(route.tab) && !route.sub && !(route.detail && !split)
         && !liveId && !deleteTarget;
     const neighbour = step => swipeOrder[swipeOrder.indexOf(route.tab) + step];
+    // 上一次滑动的翻页动画还没放完就又开始滑（连续快速翻页）：先把上一页直接翻完，
+    // 再从新页面接着滑；不然翻页被打断，会一直停在原来那页
+    const finishCommit = () => {
+        const pending = commitRef.current;
+        if (!pending) return;
+        commitRef.current = null;
+        pending.anim.stop();
+        flushSync(() => {
+            selectTab(tabs.find(t => t.key === pending.next), pending.step);
+            peekRef.current = null;
+            setPeek(null);
+        });
+        swipeX.set(0);
+    };
     useTabSwipe(canSwipe, {
-        move: dx => {
-            if (swipeX.isAnimating()) swipeX.stop();
+        begin: () => {
+            finishCommit();
+            if (swipeX.isAnimating()) swipeX.stop();   // 正在弹回：从当前位置接着拖
+            dragBase.current = swipeX.get();
+        },
+        move: gesture => {
+            const dx = dragBase.current + gesture;
             const step = dx < 0 ? 1 : -1;
             const next = neighbour(step);
             // 手指往哪边滑，就把那边的页面先摆在旁边，和当前页面连在一起被拖进来
@@ -548,14 +570,10 @@ function Workspace({ config }) {
                 return;
             }
             // 两页一起滑到位，然后旁边那页原地变成当前页（同一个组件，不重新加载、不闪）
-            animate(swipeX, -step * window.innerWidth, { type: 'tween', duration: .22, ease: [.25, .8, .35, 1] }).then(() => {
-                flushSync(() => {
-                    selectTab(tabs.find(t => t.key === next), step);
-                    peekRef.current = null;
-                    setPeek(null);
-                });
-                swipeX.set(0);
-            });
+            const anim = animate(swipeX, -step * window.innerWidth, { type: 'tween', duration: .22, ease: [.25, .8, .35, 1] });
+            const pending = { next, step, anim };
+            commitRef.current = pending;
+            anim.then(() => { if (commitRef.current === pending) finishCommit(); });
         },
     });
     useEffect(() => { slide.current = 0; }, [route]);
