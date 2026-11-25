@@ -180,7 +180,7 @@ export function Segmented({ options, value, onChange, label }) {
     return <div className="segmented" role="group" aria-label={label}>
         {options.map(option => <button key={option.value} type="button" aria-pressed={value === option.value}
             onClick={() => onChange(option.value)}>
-            {value === option.value && <motion.span layoutId={`seg-${id}`} className="segmented-thumb" transition={spring} />}
+            {value === option.value && <motion.span layoutId={`seg-${id}`} layoutDependency={value} className="segmented-thumb" transition={spring} />}
             {option.label}
         </button>)}
     </div>;

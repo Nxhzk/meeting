@@ -151,13 +151,15 @@ function MeetingRows({ cards, current, openDetail, canDelete, deleteLocked, open
             if (out.at(-1)?.label !== label) out.push({ label, cards: [] });
             out.at(-1).cards.push(card);
         }
+        for (const group of out) group.ids = group.cards.map(card => card.id).join();
         return out;
     }, [cards]);
     return groups.map(group => <section className="section" key={group.label} aria-label={group.label}>
         <h2 className="section-label">{group.label}</h2>
         <ul className="group list" role="list">
             <AnimatePresence initial={false}>
-                {group.cards.map(card => <motion.li key={card.id} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+                {/* layoutDependency：只在会议增删时让其余行挪位；滑动切换页面时整页位置变了不算 */}
+                {group.cards.map(card => <motion.li key={card.id} layout layoutDependency={group.ids} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, height: 0 }} transition={softSpring}>
                     <SwipeRow enabled={canDelete && !processing.has(card.phase) && !deleteLocked && Boolean(card.deletion_identity)}
                         label={`删除：${card.title}`} onDelete={() => openDelete(card)}>

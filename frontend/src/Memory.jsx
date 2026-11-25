@@ -182,6 +182,8 @@ export function MemoryPage({ config, sub, openMeeting, openHistory, closeHistory
     const [editing, setEditing] = useState(null);
     const visible = useMemo(() => state.entries.filter(entry =>
         (filter === 'all' || entry.category === filter) && (showDeleted || !entry.deleted)), [state.entries, filter, showDeleted]);
+    // 列表行只在条目增删、改动时挪位；左右滑动切页面时整页位置变化不触发
+    const visibleIds = visible.map(entry => `${entry.id}:${entry.deleted ? 1 : 0}:${entry.content?.length}`).join();
     const count = state.entries.filter(entry => !entry.deleted).length;
     const onSaved = saved => setState(current => ({
         ...current,
@@ -212,7 +214,7 @@ export function MemoryPage({ config, sub, openMeeting, openHistory, closeHistory
             {visible.length > 0 && <section className="section">
                 <ul className="group list" role="list">
                     <AnimatePresence initial={false}>
-                        {visible.map(entry => <motion.li key={entry.id} layout initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+                        {visible.map(entry => <motion.li key={entry.id} layout layoutDependency={visibleIds} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0, height: 0 }} transition={softSpring}>
                             <button type="button" className="row memory-row" data-deleted={entry.deleted} onClick={() => setEditing(entry)}>
                                 <span className="memory-badge" data-cat={entry.category} aria-hidden="true"><Icon name={categoryIcons[entry.category] || 'lightbulb'} /></span>
