@@ -809,3 +809,34 @@ html.sheet-open .page-stack, html.sheet-open .split-list, html.sheet-open .compa
 .voice-bars { height: 40px; display: flex; align-items: center; gap: 6px; }
 .voice-bars span { width: 6px; height: 40px; border-radius: 3px; background: var(--tint); transform-origin: center; transition: transform .08s linear; }
 .voice-overlay.cancel .voice-bars span { background: var(--red); }
+
+/* 小助理的思考流：上下雾化的小窗口，思考文字缓缓往上推；想完收成「已思考 N 秒」 */
+.thought { width: min(100%, 520px); font-size: 12.5px; color: var(--label-2); }
+.thought-head { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 6px; border-radius: 12px; background: var(--fill); color: var(--label-2); font-size: 12.5px; }
+.thought-head:disabled { opacity: 1; cursor: default; background: none; padding-left: 0; }
+.thought-head svg { width: 13px; height: 13px; }
+.thought-chevron { width: 11px !important; height: 11px !important; transition: transform .25s ease; }
+.thought.open .thought-chevron { transform: rotate(90deg); }
+/* 正在思考：文字上一道光慢慢扫过 */
+.thought.active .thought-label {
+    background: linear-gradient(90deg, var(--label-3) 0%, var(--label-3) 35%, var(--label) 50%, var(--label-3) 65%, var(--label-3) 100%);
+    background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+    animation: thought-shine 2.4s linear infinite; font-weight: 600;
+}
+@keyframes thought-shine { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+.thought-window { overflow: hidden; }
+.thought-scroll {
+    --fade: 34%;
+    margin: 6px 0 2px; padding: 0 4px 0 14px; height: 7.6em; overflow: hidden; position: relative;
+    font-size: 13px; line-height: 1.9em; color: var(--label-2); white-space: pre-wrap; word-break: break-word;
+    border-left: 2px solid color-mix(in srgb, var(--tint) 35%, transparent);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade), #000 calc(100% - 18%), transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade), #000 calc(100% - 18%), transparent 100%);
+}
+.thought-full { overflow: hidden; }
+.thought-full-text {
+    margin: 6px 0 2px; padding: 2px 4px 2px 14px; max-height: 42vh; overflow-y: auto; overscroll-behavior: contain;
+    font-size: 13px; line-height: 1.75; color: var(--label-2); white-space: pre-wrap; word-break: break-word;
+    border-left: 2px solid var(--separator);
+}
+@media (prefers-reduced-motion: reduce) { .thought.active .thought-label { animation: none; color: var(--label-2); } }

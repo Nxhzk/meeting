@@ -351,12 +351,37 @@ class LiveStateTest(unittest.TestCase):
         from src.services.companion.runner import CompanionRun
         run = CompanionRun.__new__(CompanionRun)
         run.id, run.user_id, run.proactive, run.ended, run.aborted, run.thinking = 'r1', self.user_id, False, False, False, False
-        run.segments, run.current, run.thinking_chars, run.error, run.user_messages = [], {'text': '', 'tools': []}, 0, None, 0
+        from src.services.companion.runner import _segment
+        run.segments, run.current, run.thinking_chars, run.error, run.user_messages = [], _segment(), 0, None, 0
+        run._thinking_since, run._thought_buffer, run._thought_pushed_at = None, '', 0.0
         return run
 
     def feed(self, run, *events):
         for event in events:
             run._handle(event)
+
+    def test_thinking_streams_to_the_page_and_is_kept_with_the_reply(self):
+        # 思考内容分批推给页面；刷新时快照里有；保存消息时存成「已思考 N 秒」
+        from unittest import mock
+        from src.services.companion import hub, service
+        run = self.run_obj()
+        pushed = []
+        with mock.patch.object(hub, 'publish', side_effect=lambda uid, event, data: pushed.append((event, data))):
+            self.feed(run,
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_start'}},
+                      *[{'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_delta', 'delta': '想一想'}} for _ in range(40)],
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_end'}},
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'text_delta', 'delta': '定了。'}})
+        deltas = ''.join(d['text'] for e, d in pushed if e == 'thinking' and d.get('state') == 'delta')
+        self.assertEqual(deltas, '想一想' * 40)                       # 一个字都不少
+        self.assertLess(sum(1 for e, d in pushed if d.get('state') == 'delta'), 40)   # 攒成批推，不是一字一推
+        self.assertIn('想一想', run.snapshot()['segments'][-1]['thought'])
+        with self.app.app_context():
+            saved = service._segment_messages(run, run.take())
+            self.assertEqual(saved[0].meta['thought']['text'], '想一想' * 40)
+            self.assertGreaterEqual(saved[0].meta['thought']['seconds'], 1)
+            from src.database import db
+            db.session.rollback()
 
     def test_snapshot_has_everything_written_so_far(self):
         run = self.run_obj()

@@ -22,6 +22,7 @@ SYSTEM_PROMPT = """你是「捷士通智能会议」里的小助理，是这位�
 - 只回答问的那件事，不主动补充背景、建议、风险，不追问「要不要我……」。
 - 要列的话最多 3 条，每条一行、十几个字；更多的就说「还有 N 件，要看吗」。不用标题、不加粗。
 - 之前的回答如果很长，不要模仿，按这里的要求来。
+- 你的思考过程用户也能看到：思考也用中文。
 
 例子：
 - 问「最近的会都定了些什么」→「最要紧三件：王磊 12/2 前去杭州催款；搬家暂定金台路；新机 12/1 定推广方案。还有 2 场，要看吗？」
@@ -61,7 +62,8 @@ def _now_line(user):
     zone = schedule.user_zone(user)
     now = schedule.local_now(zone)
     weekday = '一二三四五六日'[now.weekday()]
-    return f"[当前时间 {now.strftime('%Y-%m-%d %H:%M')} 周{weekday}（{zone}）]"
+    # 思考过程用户看得到：每条消息都提醒一次用中文想（只写在系统提示词里，模型常常还是用英文想）
+    return f"[当前时间 {now.strftime('%Y-%m-%d %H:%M')} 周{weekday}（{zone}）｜请用中文思考，回答要短]"
 
 
 def _session(user_id):
@@ -200,10 +202,12 @@ def _segment_messages(run, segments):
         text = segment['text'].strip()
         if not text and not segment['tools']:
             continue
-        message = CompanionMessage(user_id=run.user_id, role='assistant', kind='chat', content=text or '（已完成。）',
-                                   meta={'run': run.id,
-                                         'tools': [{'tool': t['tool'], 'label': t['label'], 'status': t['status']}
-                                                   for t in segment['tools']]})
+        meta = {'run': run.id,
+                'tools': [{'tool': t['tool'], 'label': t['label'], 'status': t['status']} for t in segment['tools']]}
+        if (segment.get('thought') or '').strip():
+            # 思考内容：页面上收成「已思考 N 秒」，点开能看
+            meta['thought'] = {'text': segment['thought'].strip(), 'seconds': max(1, round((segment.get('thought_ms') or 0) / 1000))}
+        message = CompanionMessage(user_id=run.user_id, role='assistant', kind='chat', content=text or '（已完成。）', meta=meta)
         db.session.add(message)
         saved.append(message)
     return saved

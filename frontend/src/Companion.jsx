@@ -13,12 +13,12 @@ import { apiUrl, request } from './recording/api.js';
 const SUGGESTIONS = ['最近有哪些待办快到期了？', '上次华东回款的会定了什么？', '明天上午 9 点提醒我看周报', '你记得我哪些习惯？'];
 
 // ------------------------------------------------------------ 全局连接（在 Workspace 里调用一次）
-const EMPTY_SEGMENT = () => ({ text: '', tools: [] });
+const EMPTY_SEGMENT = () => ({ text: '', tools: [], thought: '', thought_ms: 0 });
 
 /** 服务器快照 → 页面上的进行中回复。快照里是还没存成消息的各段。 */
 function fromSnapshot(snap, previous) {
     if (!snap) return null;
-    const segments = snap.segments?.length ? snap.segments : [EMPTY_SEGMENT()];
+    const segments = snap.segments?.length ? snap.segments.map(seg => ({ ...EMPTY_SEGMENT(), ...seg })) : [EMPTY_SEGMENT()];
     return { run: snap.run, segments, thinking: Boolean(snap.thinking), stopping: Boolean(snap.stopping), waiting: Boolean(snap.waiting),
         queue: snap.queue ?? null, cut: previous && previous.run === snap.run ? previous.cut : 0 };
 }
@@ -141,7 +141,12 @@ export function useCompanion(enabled = true, owner = 'me') {
                 return { ...l, segments };
             };
             on('delta', data => patch(data, l => ({ ...editLast(l, last => ({ ...last, text: last.text + data.text })), thinking: false })));
-            on('thinking', data => patch(data, l => ({ ...l, thinking: data.state === 'start' })));
+            // 思考：start 开始、delta 一小批思考文字、end 结束（带这一段累计的思考时长）
+            on('thinking', data => patch(data, l => {
+                if (data.state === 'delta') return editLast(l, last => ({ ...last, thought: (last.thought + data.text).slice(-8000) }));
+                if (data.state === 'end') return { ...editLast(l, last => ({ ...last, thought_ms: data.ms ?? last.thought_ms })), thinking: false };
+                return { ...editLast(l, last => ({ ...last, thought: last.thought && !last.thought.endsWith('\n\n') ? `${last.thought}\n\n` : last.thought })), thinking: true };
+            }));
             on('tool', data => patch(data, l => editLast(l, last => {
                 const index = last.tools.findIndex(t => t.id === data.id);
                 const tool = { id: data.id, tool: data.tool, label: data.label, status: data.status };
@@ -317,6 +322,42 @@ function ToolLine({ tools }) {
                     {tool.label}
                 </li>)}
             </motion.ol>}
+        </AnimatePresence>
+    </div>;
+}
+
+/* 思考流：思考时是一个上下雾化的小窗口，文字从下往上缓缓推过去；想完收成「已思考 N 秒」，点开看全文。 */
+function ThoughtStream({ text, ms = 0, active = false }) {
+    const [open, setOpen] = useState(false);
+    const since = useRef(Date.now());
+    const [now, setNow] = useState(Date.now());
+    const window_ = useRef(null);
+    useEffect(() => {
+        if (!active) return;
+        const timer = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(timer);
+    }, [active]);
+    useLayoutEffect(() => {
+        const node = window_.current;
+        if (active && node) node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' });
+    }, [text, active]);
+    if (!active && !text?.trim()) return null;
+    const seconds = Math.max(1, Math.round(active ? Math.max(ms, now - since.current) / 1000 : ms / 1000));
+    return <div className={`thought${active ? ' active' : ''}${open ? ' open' : ''}`}>
+        <button type="button" className="thought-head" disabled={active} aria-expanded={active ? undefined : open} onClick={() => setOpen(!open)}>
+            {active ? <LiquidMark size={18} energy={1} /> : <Icon name="lightbulb" />}
+            <span className="thought-label">{active ? `正在思考 · ${seconds} 秒` : `已思考 ${seconds} 秒`}</span>
+            {!active && <Icon name="chevron" className="thought-chevron" />}
+        </button>
+        <AnimatePresence initial={false}>
+            {active && <motion.div key="stream" className="thought-window" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }} transition={softSpring}>
+                <div ref={window_} className="thought-scroll" aria-live="off">{(text || '…').replace(/\n{2,}/g, '\n')}</div>
+            </motion.div>}
+            {!active && open && <motion.div key="full" className="thought-full" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }} transition={softSpring}>
+                <div className="thought-full-text">{text}</div>
+            </motion.div>}
         </AnimatePresence>
     </div>;
 }
@@ -603,6 +644,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
         const shown = revealed[message.id] ?? chunks.length;
         if (shown === 0) continue;
         items.push(<div className="msg-group" key={message.id}>
+            <ThoughtStream text={message.meta?.thought?.text} ms={(message.meta?.thought?.seconds || 0) * 1000} />
             <ToolLine tools={message.meta?.tools} />
             <Bubbles chunks={chunks.slice(0, shown)} mine={false} time={time} kind={message.kind} label={proactiveLabel(message)}
                 meta={message.meta?.stopped ? '已停止 · ' : ''} done={shown >= chunks.length}
@@ -613,8 +655,10 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
         live.segments.forEach((segment, i) => {
             const done = completedChunks(segment.text);
             const count = Math.min(liveShown[i] || 0, done.length);
-            if (!count && !segment.tools.length) return;
+            const thinkingNow = live.thinking && i === live.segments.length - 1;
+            if (!count && !segment.tools.length && !segment.thought && !thinkingNow) return;
             items.push(<div className="msg-group" key={`live-${i}`}>
+                <ThoughtStream text={segment.thought} ms={segment.thought_ms} active={thinkingNow} />
                 <ToolLine tools={segment.tools} />
                 {count > 0 && <Bubbles chunks={done.slice(0, count)} mine={false} done={false} animate onMeeting={openMeeting} />}
             </div>);
@@ -665,7 +709,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
                     </div>
                 </motion.div>}
                 {items}
-                <AnimatePresence>{typing && <Typing key="typing" label={live?.queue != null ? (live.queue > 0 ? `排队中，前面还有 ${live.queue} 位` : '排队中，马上开始') : toolBusy ? '查资料中' : '正在输入'} />}</AnimatePresence>
+                <AnimatePresence>{typing && !live?.thinking && <Typing key="typing" label={live?.queue != null ? (live.queue > 0 ? `排队中，前面还有 ${live.queue} 位` : '排队中，马上开始') : toolBusy ? '查资料中' : '正在输入'} />}</AnimatePresence>
             </div>
         </div>
 

@@ -93,9 +93,12 @@ class CompanionRun:
         self.session_jsonl = session_jsonl
         self.finished = threading.Event()
         self.token = tokens.issue(user_id, ttl=self.settings.timeout + 300, context=context)
-        self.segments = []          # [{'text', 'tools'}] 每段回复（插话会切分段落）
-        self.current = {'text': '', 'tools': []}
+        self.segments = []          # [{'text', 'tools', 'thought', 'thought_ms'}] 每段回复（插话会切分段落）
+        self.current = _segment()
         self.thinking_chars = 0
+        self._thinking_since = None
+        self._thought_buffer = ''   # 还没推给页面的思考文字（攒一小批再推，不一个字一推）
+        self._thought_pushed_at = 0.0
         self.error = None
         self.aborted = False
         self.closing = False        # 已收到 agent_end：再插话 pi 也不会处理了
@@ -229,8 +232,10 @@ class CompanionRun:
         """这次回复现在的样子：还没保存成消息的各段文字和工具调用。调用方须持有 hub.guard。"""
         if self.proactive or self.ended:
             return None
-        segments = [dict(seg, tools=[dict(t) for t in seg['tools']]) for seg in self.segments]
-        segments.append(dict(self.current, tools=[dict(t) for t in self.current['tools']]))
+        segments = [dict(seg, tools=[dict(t) for t in seg['tools']], thought=seg['thought'][-THOUGHT_SNAPSHOT:])
+                    for seg in self.segments]
+        segments.append(dict(self.current, tools=[dict(t) for t in self.current['tools']],
+                             thought=self.current['thought'][-THOUGHT_SNAPSHOT:]))
         return {'run': self.id, 'segments': segments, 'thinking': self.thinking, 'stopping': self.aborted}
 
     def take(self, *, keep_running=False):
@@ -244,12 +249,12 @@ class CompanionRun:
             done = [t for t in self.current['tools'] if t['status'] != 'running']
             running = [t for t in self.current['tools'] if t['status'] == 'running']
             if self.current['text'].strip() or done:
-                taken.append({'text': self.current['text'], 'tools': done})
-            self.current = {'text': '', 'tools': running}
+                taken.append({**self.current, 'tools': done})
+            self.current = _segment(tools=running)
         else:
             if self.current['text'].strip() or self.current['tools']:
                 taken.append(self.current)
-            self.current = {'text': '', 'tools': []}
+            self.current = _segment()
         return [seg for seg in taken if seg['text'].strip() or seg['tools']]
 
     # ---------------------------------------------------------------- 事件
@@ -260,7 +265,7 @@ class CompanionRun:
     def _flush_segment(self):
         if self.current['text'].strip() or self.current['tools']:
             self.segments.append(self.current)
-        self.current = {'text': '', 'tools': []}
+        self.current = _segment()
 
     def _read(self):
         try:
@@ -287,12 +292,25 @@ class CompanionRun:
                 self._publish('delta', {'text': delta.get('delta') or ''})
             elif delta.get('type') == 'thinking_start':
                 self.thinking = True
+                self._thinking_since = time.monotonic()
+                if self.current['thought'] and not self.current['thought'].endswith('\n\n'):
+                    self.current['thought'] += '\n\n'     # 同一段里第二次思考（查完资料再想）：空一行
                 self._publish('thinking', {'state': 'start'})
             elif delta.get('type') == 'thinking_delta':
-                self.thinking_chars += len(delta.get('delta') or '')
+                text = delta.get('delta') or ''
+                self.thinking_chars += len(text)
+                self.current['thought'] = (self.current['thought'] + text)[-THOUGHT_KEEP:]
+                self._thought_buffer += text
+                now = time.monotonic()
+                if len(self._thought_buffer) >= 80 or now - self._thought_pushed_at > .15:
+                    self._push_thought(now)
             elif delta.get('type') == 'thinking_end':
+                self._push_thought(time.monotonic())
                 self.thinking = False
-                self._publish('thinking', {'state': 'end', 'chars': self.thinking_chars})
+                if self._thinking_since is not None:
+                    self.current['thought_ms'] += int((time.monotonic() - self._thinking_since) * 1000)
+                    self._thinking_since = None
+                self._publish('thinking', {'state': 'end', 'chars': self.thinking_chars, 'ms': self.current['thought_ms']})
         elif kind == 'message_start':
             message = event.get('message') or {}
             if message.get('role') == 'user':
@@ -318,6 +336,12 @@ class CompanionRun:
                 if tool['id'] == event.get('toolCallId'):
                     tool['status'] = 'error' if event.get('isError') else 'ok'
                     self._publish('tool', tool)
+
+    def _push_thought(self, now):
+        if self._thought_buffer:
+            self._publish('thinking', {'state': 'delta', 'text': self._thought_buffer})
+            self._thought_buffer = ''
+        self._thought_pushed_at = now
 
     def _drain_stderr(self):
         for raw in self.process.stderr:
@@ -382,6 +406,14 @@ class CompanionRun:
 
     def _cleanup(self):
         shutil.rmtree(self.work, ignore_errors=True)
+
+
+THOUGHT_KEEP = 8000       # 每段回复最多留多少字的思考内容（存进消息，可以点开看）
+THOUGHT_SNAPSHOT = 2000   # 页面刷新时接上的思考内容（只要够填满思考窗口）
+
+
+def _segment(tools=None):
+    return {'text': '', 'tools': tools or [], 'thought': '', 'thought_ms': 0}
 
 
 def _label(event):
