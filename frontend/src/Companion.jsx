@@ -4,6 +4,7 @@ import { Icon, Menu, MenuItem, NavButton, Sheet, dayLabel, softSpring, spring, t
 import { chunkHtml, completedChunks, splitReply, typingDelay } from './chat-format.js';
 import { LiquidMark } from './LiquidOrb.jsx';
 import { JstLoader } from './JstMark.jsx';
+import { VoiceButton } from './VoiceInput.jsx';
 import { apiUrl, request } from './recording/api.js';
 
 /* 小助理：和用户的一条连续对话。
@@ -305,14 +306,14 @@ function ToolLine({ tools }) {
     const running = tools.some(t => t.status === 'running');
     return <div className="tool-summary">
         <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}>
-            {running ? <span className="trace-spin" /> : <Icon name="checkCircle" />}
+            {running ? <JstLoader size={16} /> : <Icon name="checkCircle" />}
             <span>{summary}{Object.keys(counts).length > 3 ? ' …' : ''}</span>
             <Icon name="chevron" className="tool-chevron" />
         </button>
         <AnimatePresence initial={false}>
             {open && <motion.ol initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={softSpring}>
                 {tools.map((tool, i) => <li key={tool.id || i} data-status={tool.status}>
-                    {tool.status === 'running' ? <span className="trace-spin" /> : <Icon name={tool.status === 'error' ? 'warning' : 'check'} />}
+                    {tool.status === 'running' ? <JstLoader size={16} /> : <Icon name={tool.status === 'error' ? 'warning' : 'check'} />}
                     {tool.label}
                 </li>)}
             </motion.ol>}
@@ -349,7 +350,7 @@ function proactiveLabel(message) {
 }
 
 // ------------------------------------------------------------ 页面
-export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
+export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingBusy }) {
     const toast = useToast();
     const scroller = useRef(null);
     const field = useRef(null);
@@ -668,9 +669,14 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
                     ? <motion.button key="stop" type="button" className="composer-btn stop" aria-label={stopping ? '正在停止' : '停止'} onClick={stop} disabled={stopping}
                         initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
                         <Icon name="stop" /></motion.button>
-                    : <motion.button key="send" type="submit" className="composer-btn" aria-label="发送" disabled={!text.trim()}
-                        initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
-                        <Icon name="up" /></motion.button>}
+                    : text.trim()
+                        ? <motion.button key="send" type="submit" className="composer-btn" aria-label="发送"
+                            initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
+                            <Icon name="up" /></motion.button>
+                        // 输入框是空的：按住说话（开会录音时麦克风被占着，不能用）
+                        : <VoiceButton key="voice" blockedReason={meetingBusy ? '正在开会录音，麦克风被占用，会议结束后再用语音输入。' : ''}
+                            onError={message => toast(message, 'bad')}
+                            onText={spoken => { setText(text.trim() ? `${text} ${spoken}` : spoken); requestAnimationFrame(resize); }} />}
             </AnimatePresence>
         </form>
 

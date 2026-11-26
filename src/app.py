@@ -725,7 +725,7 @@ def exempt_status_endpoints():
     # 被拦的不只是列表，还有录音续传要用的令牌。这些都只对已登录用户、且有自己的权限检查。
     if request.path == '/api/csrf-token' and request.method == 'GET':
         return True
-    if request.path.startswith('/api/meetings'):
+    if request.path.startswith(('/api/meetings', '/api/assistant')):
         from flask_login import current_user
         if current_user.is_authenticated:
             return True

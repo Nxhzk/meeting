@@ -31,10 +31,10 @@ async function refreshCsrf() {
     await refreshInFlight;
 }
 
-export async function request(path, { method = 'GET', json, blob, timeout = 12000 } = {}) {
+export async function request(path, { method = 'GET', json, blob, contentType, timeout = 12000 } = {}) {
     const headers = { Accept: 'application/json' };
     if (json !== undefined) headers['Content-Type'] = 'application/json';
-    if (blob) headers['Content-Type'] = 'application/octet-stream';
+    if (blob) headers['Content-Type'] = contentType || 'application/octet-stream';
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     const send = async () => {

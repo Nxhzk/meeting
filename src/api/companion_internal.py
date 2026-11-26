@@ -376,3 +376,16 @@ def send_message():
     from src.services.companion.push import notify_async
     notify_async(_uid(), message.id)
     return jsonify({'sent': message.id}), 201
+
+
+# ---------------------------------------------------------------- 联网搜索
+
+@companion_internal_bp.post('/web-search')
+def web_search():
+    from src.services import web_search as searcher
+    query = str(_body().get('query') or '')
+    now_text = schedule.local_now(_zone()).strftime('%Y年%m月%d日 %H:%M')
+    try:
+        return jsonify(searcher.search(_uid(), query, now_text=now_text))
+    except searcher.WebSearchError as error:
+        return _error(str(error), 400)

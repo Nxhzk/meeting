@@ -73,6 +73,66 @@ class CompanionApiTest(unittest.TestCase):
         self.assertEqual(client.get('/internal/assistant/meetings', headers=proxied).status_code, 404)
         self.assertEqual(client.get('/internal/assistant/meetings', headers=headers).status_code, 200)
 
+    def test_web_search_goes_through_the_server_with_sources_and_a_daily_cap(self):
+        # 联网搜索由服务器带密钥去搜：小助理拿到回答和来源，拿不到密钥；每人每天有次数上限
+        from unittest import mock
+        from src.services import web_search
+        client, headers = self.internal()
+        reply = mock.Mock(status_code=200)
+        reply.json.return_value = {'output': {
+            'choices': [{'message': {'content': '深圳 2026 年最低工资 2520 元[1]。'}}],
+            'search_info': {'search_results': [{'index': 1, 'title': '深圳市人社局', 'url': 'https://hrss.sz.gov.cn/x', 'site_name': '深圳人社'}]}}}
+        web_search._used.clear()
+        with mock.patch.dict('os.environ', {'ALIYUN_ASR_API_KEY': 'secret-key-123', 'WEB_SEARCH_DAILY_LIMIT': '2'}), \
+                mock.patch('src.services.web_search.httpx.post', return_value=reply) as post:
+            first = client.post('/internal/assistant/web-search', json={'query': '深圳最低工资'}, headers=headers)
+            self.assertEqual(first.status_code, 200)
+            data = first.get_json()
+            self.assertIn('2520', data['answer'])
+            self.assertEqual(data['sources'][0]['url'], 'https://hrss.sz.gov.cn/x')
+            self.assertNotIn('secret-key-123', first.get_data(as_text=True))
+            self.assertTrue(post.call_args.kwargs['json']['parameters']['enable_search'])
+            self.assertEqual(client.post('/internal/assistant/web-search', json={'query': '天气'}, headers=headers).status_code, 200)
+            capped = client.post('/internal/assistant/web-search', json={'query': '第三次'}, headers=headers)
+            self.assertEqual(capped.status_code, 400)
+            self.assertIn('用完', capped.get_json()['error'])
+            self.assertEqual(post.call_count, 2)
+            empty = client.post('/internal/assistant/web-search', json={'query': '  '}, headers=headers)
+            self.assertEqual(empty.status_code, 400)
+
+    def test_voice_input_turns_speech_into_text_with_memory_names_as_hints(self):
+        # 语音输入：服务器带密钥去识别，提示词里有公司名和这位用户记忆里的人物；格式、空录音会被拒绝
+        import re as _re
+        from unittest import mock
+        from src.database import db
+        from src.models.meeting_assistant import MemoryEntry
+        from src.services import voice_input
+        with self.app.app_context():
+            db.session.add(MemoryEntry(user_id=self.owner_id, category='person', content='卢总是采购负责人'))
+            db.session.commit()
+        client = self.app.test_client()
+        self.login(client)
+        token = client.environ_base['HTTP_X_CSRFTOKEN']
+        reply = mock.Mock(status_code=200)
+        reply.json.return_value = {'choices': [{'message': {'content': '明天下午三点提醒我给卢总回电话。'}}]}
+        voice_input._used.clear()
+        with mock.patch.dict('os.environ', {'ALIYUN_ASR_API_KEY': 'secret-key-123'}), \
+                mock.patch('src.services.voice_input.httpx.post', return_value=reply) as post:
+            ok = client.post('/api/assistant/transcribe', data=b'fake-opus', content_type='audio/webm;codecs=opus',
+                             headers={'X-CSRFToken': token})
+            self.assertEqual(ok.status_code, 200, ok.get_data(as_text=True))
+            self.assertEqual(ok.get_json()['text'], '明天下午三点提醒我给卢总回电话。')
+            sent = post.call_args.kwargs['json']
+            hint = sent['messages'][0]['content'][0]['text']
+            self.assertIn('捷士通', hint)
+            self.assertIn('卢总是采购负责人', hint)
+            self.assertTrue(sent['messages'][1]['content'][0]['input_audio']['data'].startswith('data:audio/webm;base64,'))
+            self.assertNotIn('secret-key-123', ok.get_data(as_text=True))
+            bad = client.post('/api/assistant/transcribe', data=b'x', content_type='text/plain', headers={'X-CSRFToken': token})
+            self.assertEqual(bad.status_code, 400)
+            empty = client.post('/api/assistant/transcribe', data=b'', content_type='audio/webm', headers={'X-CSRFToken': token})
+            self.assertEqual(empty.status_code, 400)
+
     def test_internal_api_only_sees_the_users_own_meetings(self):
         client, headers = self.internal()
         titles = [m['title'] for m in client.get('/internal/assistant/meetings', headers=headers).get_json()['meetings']]

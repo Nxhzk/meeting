@@ -513,7 +513,7 @@ function Workspace({ config }) {
         localSession={['recording', 'paused', 'saving', 'opening'].includes(mode) ? (capture.current?.session?.remote || capture.current?.session?.id) : null} />;
     const companionPage = <CompanionPage key="assistant" companion={companion}
         openMeeting={id => go(`#meeting-${id}`, { tab: 'meetings', detail: id, origin: 'assistant' })}
-        onBack={closeAssistant} onGrab={event => drawerDrag.start(event)} />;
+        onBack={closeAssistant} onGrab={event => drawerDrag.start(event)} meetingBusy={busyPhases.has(mode)} />;
     const showAssistant = route.tab === 'assistant' || overAssistant;
     // 抽屉底下显示的那一页
     const base = showAssistant ? lastTab.current : route.tab;

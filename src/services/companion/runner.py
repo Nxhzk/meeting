@@ -23,7 +23,7 @@ from src.services import assistant_capacity as capacity
 from src.services.companion import hub, tokens
 
 logger = logging.getLogger(__name__)
-TOOLS = ('read', 'meeting_api')
+TOOLS = ('read', 'meeting_api', 'web_search')
 
 _lock = threading.Lock()
 _runs = {}    # user_id -> CompanionRun
@@ -387,6 +387,9 @@ class CompanionRun:
 def _label(event):
     """工具调用给用户看的一句话。"""
     args = event.get('args') or {}
+    if event.get('toolName') == 'web_search':
+        query = ' '.join(str(args.get('query') or '').split())
+        return f'联网搜索：{query[:30]}' if query else '联网搜索'
     if event.get('toolName') == 'read':
         path = str(args.get('path') or '')
         return '查看用法说明' if 'meeting-api' in path else '查看自己的角色说明' if 'assistant-companion' in path else '读取说明'

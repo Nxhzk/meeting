@@ -791,3 +791,15 @@ html.sheet-open .page-stack, html.sheet-open .split-list, html.sheet-open .compa
 .boot-splash { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
 .boot-splash-text { color: var(--label-2); font-size: 15px; letter-spacing: .02em; animation: boot-fade 1s ease .6s both; }
 @keyframes boot-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* 小助理语音输入：按住说话 */
+.composer-btn.voice { background: var(--fill); color: var(--tint); touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.composer-btn.voice.holding { background: var(--tint); color: #fff; }
+.voice-overlay { position: fixed; inset: 0; z-index: 70; display: flex; align-items: flex-end; justify-content: center; padding-bottom: calc(var(--safe-bottom) + 110px); background: color-mix(in srgb, var(--bg) 35%, transparent); pointer-events: none; }
+.voice-card { min-width: 220px; padding: 22px 26px 18px; border-radius: 26px; display: grid; justify-items: center; gap: 12px; text-align: center; }
+.voice-card strong { font-size: 15px; font-weight: 600; color: var(--label); }
+.voice-overlay.cancel .voice-card strong { color: var(--red); }
+.voice-time { font-size: 13px; color: var(--label-2); font-variant-numeric: tabular-nums; }
+.voice-bars { height: 40px; display: flex; align-items: center; gap: 6px; }
+.voice-bars span { width: 6px; height: 40px; border-radius: 3px; background: var(--tint); transform-origin: center; transition: transform .08s linear; }
+.voice-overlay.cancel .voice-bars span { background: var(--red); }

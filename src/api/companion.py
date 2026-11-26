@@ -78,6 +78,18 @@ def send():
     return _json({'message': service.message_json(message)}, 201)
 
 
+@companion_bp.post('/transcribe')
+@login_required
+def transcribe():
+    """语音输入：按住说话录下的一段短语音 → 文字（放进输入框，用户确认后再发）。"""
+    from src.services import voice_input
+    try:
+        text = voice_input.transcribe(current_user.id, request.get_data(cache=False), request.mimetype)
+    except voice_input.VoiceInputError as error:
+        return _json({'error': str(error)}, 400)
+    return _json({'text': text})
+
+
 @companion_bp.post('/stop')
 @login_required
 def stop():

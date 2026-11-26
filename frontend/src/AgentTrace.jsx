@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
+import { JstLoader } from './JstMark.jsx';
 import { Icon, softSpring } from './ui.jsx';
 
 /* 会议助手的实时工具调用流：pi 真实调用的每个工具、每段思考、撰写摘要的过程。 */
@@ -89,7 +90,7 @@ export function AgentTrace({ events = [] }) {
         </div>
         <ol className="trace-list" ref={list} aria-live="polite" data-overflow={overflow}>
             {!events.length && <li className="trace-empty" data-status="running">
-                <span className="trace-icon"><span className="trace-spin" /></span>
+                <span className="trace-icon"><JstLoader size={16} /></span>
                 <span className="trace-body"><span className="trace-line"><span className="trace-label">正在启动会议助手…</span></span></span>
             </li>}
             <AnimatePresence initial={false}>
@@ -98,7 +99,7 @@ export function AgentTrace({ events = [] }) {
                     return <motion.li key={event.key} data-status={event.status} data-kind={event.kind}
                         initial={{ opacity: 0, y: 14, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={softSpring}>
                         <span className="trace-icon">
-                            {event.status === 'running' ? <span className="trace-spin" /> : <Icon name={event.status === 'error' ? 'warning' : view.icon} />}
+                            {event.status === 'running' ? <JstLoader size={16} /> : <Icon name={event.status === 'error' ? 'warning' : view.icon} />}
                         </span>
                         <span className="trace-body">
                             <span className="trace-line">
