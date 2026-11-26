@@ -48,11 +48,20 @@ class RunnerStreamTest(unittest.TestCase):
         # 全部留着要 300 MB 以上；逐行处理时只有几行在内存里
         self.assertLess(peak, 60 * 1024 * 1024, f'峰值 {peak // 1048576} MB')
 
-    def test_timeout_fires_while_output_never_stops(self):
+    def test_a_run_that_keeps_working_is_not_cut_off_by_the_idle_limit(self):
+        # 一直有输出：空闲上限（1 秒）不会掐掉它，只有总时长上限（死循环保护）会停
         started = time.monotonic()
-        with self.assertRaises(runner.AssistantRunFailed):
-            run(EMIT_FOREVER, 1)
-        self.assertLess(time.monotonic() - started, 15)
+        with self.assertRaises(runner.AssistantRunFailed) as caught:
+            runner._execute([sys.executable, '-c', EMIT_FOREVER], None, None, 1, [], None, None, max_run=4)
+        self.assertGreaterEqual(time.monotonic() - started, 3.5)
+        self.assertIn('小时', str(caught.exception))
+
+    def test_a_silent_run_is_stopped_as_stuck(self):
+        started = time.monotonic()
+        with self.assertRaises(runner.AssistantRunFailed) as caught:
+            run("import time; time.sleep(30)", 1)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn('没有任何进展', str(caught.exception))
 
     def test_last_successful_save_wins(self):
         code = "import json\n" + "\n".join(

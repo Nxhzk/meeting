@@ -342,7 +342,13 @@ def _kill(process):
             pass
 
 
-def _execute(command, env, cwd, timeout, parts, report, cancel_requested, trace=None, stdin_text=''):
+# 会议纪要不限时长：只要还在输出（思考、读原文、调用工具）就一直等。
+# 连续 IDLE 秒没有任何输出才算卡死；总时长的上限只用来拦住死循环（正常的会碰不到）。
+MAX_RUN_SECONDS = int(os.environ.get('ASSISTANT_MAX_RUN_SECONDS') or 4 * 3600)
+
+
+def _execute(command, env, cwd, timeout, parts, report, cancel_requested, trace=None, stdin_text='', max_run=None):
+    """timeout：连续多少秒没有输出就停（卡死）；max_run：总时长上限（防死循环）。"""
     progress = Progress(parts, report)
     result = RunResult(session_jsonl=None)
     stderr_tail = []
@@ -374,7 +380,9 @@ def _execute(command, env, cwd, timeout, parts, report, cancel_requested, trace=
             reader_done.set()
 
     threading.Thread(target=drain_stdout, daemon=True).start()
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    last_output = started
+    max_run = max_run or MAX_RUN_SECONDS
     last_cancel_check = 0.0
     try:
         while True:
@@ -383,14 +391,18 @@ def _execute(command, env, cwd, timeout, parts, report, cancel_requested, trace=
             except queue.Empty:
                 raw = None
             if raw is not None:
+                last_output = time.monotonic()
                 _handle_event(raw, result, progress, trace)
                 raw = None
             elif reader_done.is_set() and process.poll() is not None and lines.empty():
                 break
             now = time.monotonic()
-            if now > deadline:
+            if now - last_output > timeout:
                 _kill(process)
-                raise AssistantRunFailed(f'会议助手超过 {timeout // 60} 分钟仍未完成，已停止。')
+                raise AssistantRunFailed(f'会议助手连续 {max(1, timeout // 60)} 分钟没有任何进展，可能卡住了，已停止。可以点「重新生成」再试。')
+            if now - started > max_run:
+                _kill(process)
+                raise AssistantRunFailed(f'会议助手运行超过 {max_run // 3600} 小时仍未完成，已停止。可以点「重新生成」再试。')
             if cancel_requested and now - last_cancel_check > 2:
                 last_cancel_check = now
                 if cancel_requested():
