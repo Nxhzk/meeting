@@ -12,7 +12,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation'
+# qwen3.x 系列走多模态接口（文本接口会报 url error）；模型选百炼免费额度里有的
+ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
 MAX_QUERY = 200
 MAX_ANSWER = 4000
 MAX_SOURCES = 8
@@ -64,13 +65,14 @@ def search(user_id, query, now_text=None):
         f'请联网搜索并回答：{query}\n'
         '要求：只根据搜索到的内容回答，简洁，给出关键事实、数字和日期；搜不到或说法不一致就直说。')
     body = {
-        'model': os.environ.get('WEB_SEARCH_MODEL') or 'qwen-plus',
-        'input': {'messages': [{'role': 'user', 'content': prompt}]},
+        'model': os.environ.get('WEB_SEARCH_MODEL') or 'qwen3.8-flash',
+        'input': {'messages': [{'role': 'user', 'content': [{'text': prompt}]}]},
         'parameters': {
             'result_format': 'message',
+            'enable_thinking': False,   # 只需要整理搜索结果，不需要思考，省 token
             'enable_search': True,
             'search_options': {'forced_search': True, 'enable_source': True, 'enable_citation': True,
-                               'search_strategy': os.environ.get('WEB_SEARCH_STRATEGY') or 'pro'},
+                               'search_strategy': os.environ.get('WEB_SEARCH_STRATEGY') or 'turbo'},
         },
     }
     try:
@@ -85,7 +87,10 @@ def search(user_id, query, now_text=None):
         raise WebSearchError('联网搜索暂时不可用，请稍后再试。')
     output = data['output']
     choices = output.get('choices') or [{}]
-    answer = str((choices[0].get('message') or {}).get('content') or '').strip()[:MAX_ANSWER]
+    content = (choices[0].get('message') or {}).get('content') or ''
+    if isinstance(content, list):
+        content = ''.join(part.get('text', '') for part in content if isinstance(part, dict))
+    answer = str(content).strip()[:MAX_ANSWER]
     sources = []
     for item in ((output.get('search_info') or {}).get('search_results') or [])[:MAX_SOURCES]:
         if item.get('url'):

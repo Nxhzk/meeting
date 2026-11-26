@@ -80,7 +80,7 @@ class CompanionApiTest(unittest.TestCase):
         client, headers = self.internal()
         reply = mock.Mock(status_code=200)
         reply.json.return_value = {'output': {
-            'choices': [{'message': {'content': '深圳 2026 年最低工资 2520 元[1]。'}}],
+            'choices': [{'message': {'content': [{'text': '深圳 2026 年最低工资 2520 元[1]。'}]}}],
             'search_info': {'search_results': [{'index': 1, 'title': '深圳市人社局', 'url': 'https://hrss.sz.gov.cn/x', 'site_name': '深圳人社'}]}}}
         web_search._used.clear()
         with mock.patch.dict('os.environ', {'ALIYUN_ASR_API_KEY': 'secret-key-123', 'WEB_SEARCH_DAILY_LIMIT': '2'}), \
@@ -91,7 +91,9 @@ class CompanionApiTest(unittest.TestCase):
             self.assertIn('2520', data['answer'])
             self.assertEqual(data['sources'][0]['url'], 'https://hrss.sz.gov.cn/x')
             self.assertNotIn('secret-key-123', first.get_data(as_text=True))
-            self.assertTrue(post.call_args.kwargs['json']['parameters']['enable_search'])
+            sent = post.call_args.kwargs['json']
+            self.assertTrue(sent['parameters']['enable_search'])
+            self.assertEqual(sent['model'], 'qwen3.8-flash')   # 百炼免费额度里的模型
             self.assertEqual(client.post('/internal/assistant/web-search', json={'query': '天气'}, headers=headers).status_code, 200)
             capped = client.post('/internal/assistant/web-search', json={'query': '第三次'}, headers=headers)
             self.assertEqual(capped.status_code, 400)
@@ -108,7 +110,7 @@ class CompanionApiTest(unittest.TestCase):
         from src.models.meeting_assistant import MemoryEntry
         from src.services import voice_input
         with self.app.app_context():
-            db.session.add(MemoryEntry(user_id=self.owner_id, category='person', content='卢总是采购负责人'))
+            db.session.add(MemoryEntry(user_id=self.owner_id, category='person', content='卢总是采购负责人，负责供应商谈判和每月对账'))
             db.session.commit()
         client = self.app.test_client()
         self.login(client)
@@ -125,9 +127,14 @@ class CompanionApiTest(unittest.TestCase):
             sent = post.call_args.kwargs['json']
             hint = sent['messages'][0]['content'][0]['text']
             self.assertIn('捷士通', hint)
-            self.assertIn('卢总是采购负责人', hint)
+            self.assertIn('卢总', hint)
+            self.assertNotIn('供应商谈判', hint)   # 只发名字，不发记忆的整句内容
             self.assertTrue(sent['messages'][1]['content'][0]['input_audio']['data'].startswith('data:audio/webm;base64,'))
             self.assertNotIn('secret-key-123', ok.get_data(as_text=True))
+            # 没听清时模型会把提示词吐出来：当作没识别出来
+            reply.json.return_value = {'choices': [{'message': {'content': hint}}]}
+            echo = client.post('/api/assistant/transcribe', data=b'fake-opus', content_type='audio/webm', headers={'X-CSRFToken': token})
+            self.assertEqual(echo.get_json()['text'], '')
             bad = client.post('/api/assistant/transcribe', data=b'x', content_type='text/plain', headers={'X-CSRFToken': token})
             self.assertEqual(bad.status_code, 400)
             empty = client.post('/api/assistant/transcribe', data=b'', content_type='audio/webm', headers={'X-CSRFToken': token})

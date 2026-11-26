@@ -7,6 +7,7 @@
 import base64
 import logging
 import os
+import re
 import threading
 from datetime import date
 
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
 MAX_BYTES = 3 * 1024 * 1024        # 一分钟的语音压缩后远小于这个数
-CONTEXT_CHARS = 600
+CONTEXT_CHARS = 300
 MIME_TYPES = {'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/aac', 'audio/mpeg', 'audio/wav', 'audio/x-m4a'}
 
 _lock = threading.Lock()
@@ -53,20 +54,38 @@ def _take_quota(user_id):
         return True
 
 
-def _context(user_id):
-    """识别时的提示词：公司名、常用词，加上长期记忆里的人物、项目（只取开头一段）。"""
-    words = '捷士通智能会议的小助理。常用词：捷士通、会议纪要、待办、提醒、长期记忆、摘要。'
+_NAME_END = re.compile(r'[：:，,。；;（(\s是为在的]')
+
+
+def _names(user_id):
+    """长期记忆里的人名、项目名：只取每条开头的名字（几个字），不把整句内容发出去。"""
     try:
         from src.models.meeting_assistant import MemoryEntry
         rows = (MemoryEntry.query.filter_by(user_id=user_id, deleted_at=None)
                 .filter(MemoryEntry.category.in_(('person', 'project')))
-                .order_by(MemoryEntry.pinned.desc(), MemoryEntry.id.desc()).limit(40).all())
-        facts = '；'.join(r.content for r in rows)
-        if facts:
-            words += '相关人物和项目：' + facts
+                .order_by(MemoryEntry.pinned.desc(), MemoryEntry.id.desc()).limit(60).all())
     except Exception:
         logger.exception('Could not load memory for voice input context')
-    return words[:CONTEXT_CHARS]
+        return []
+    names = []
+    for row in rows:
+        name = _NAME_END.split(row.content.strip(), 1)[0][:12]
+        if 2 <= len(name) and name not in names:
+            names.append(name)
+    return names
+
+
+def _context(user_id):
+    """识别时的提示词：只是一串可能出现的词，帮模型认准专有名词。"""
+    words = ['捷士通', '会议纪要', '待办', '提醒', '长期记忆', '摘要'] + _names(user_id)
+    return ('可能出现的词：' + '、'.join(words))[:CONTEXT_CHARS]
+
+
+def _echoes(text, context):
+    """模型没听清时会把提示词当成结果吐出来：结果里有提示词的一大段原文，就当作没识别出来。"""
+    plain = re.sub(r'\s', '', text)
+    hint = re.sub(r'\s', '', context)
+    return any(hint[i:i + 12] in plain for i in range(0, max(0, len(hint) - 11), 4))
 
 
 def transcribe(user_id, audio, mime_type):
@@ -81,10 +100,11 @@ def transcribe(user_id, audio, mime_type):
         raise VoiceInputError('语音输入还没有配置。')
     if not _take_quota(user_id):
         raise VoiceInputError(f'今天的语音输入次数（{_daily_limit()} 次）已经用完，明天再试。')
+    context = _context(user_id)
     body = {
         'model': os.environ.get('VOICE_INPUT_MODEL') or 'qwen3-asr-flash',
         'messages': [
-            {'role': 'system', 'content': [{'text': _context(user_id)}]},
+            {'role': 'system', 'content': [{'text': context}]},
             {'role': 'user', 'content': [{'type': 'input_audio', 'input_audio': {
                 'data': f'data:{mime};base64,{base64.b64encode(audio).decode()}'}}]},
         ],
@@ -101,4 +121,7 @@ def transcribe(user_id, audio, mime_type):
         logger.warning('Voice input rejected (%s): %s', response.status_code, str(data.get('error') or data)[:200])
         raise VoiceInputError('语音识别暂时不可用，请稍后再试。')
     text = str(data['choices'][0].get('message', {}).get('content') or '').strip()
+    if text and _echoes(text, context):
+        logger.warning('Voice input returned the hint words instead of speech; treated as unheard')
+        return ''
     return text
