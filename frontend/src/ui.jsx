@@ -129,6 +129,8 @@ export function useBackClose(open, close) {
     }, [open]);
 }
 
+let openSheets = 0;   // 同时开着几个面板（叠着开时，最后一个关上才放开后面的页面）
+
 export function Sheet({ open, onClose, title, busy = false, children, actions, labelledBy }) {
     const dialog = useRef(null);
     const drag = useDragControls();
@@ -140,6 +142,30 @@ export function Sheet({ open, onClose, title, busy = false, children, actions, l
     }, [open]);
     const close = () => { if (!busy) onClose(); };
     useBackClose(open, close);   // 正在提交（busy）时按返回键：面板不关，也不退出软件
+    // 内容一屏放得下（不用滚动）时，整个面板任何地方都能往下拖着关；要滚动时只拖把手和标题栏
+    const [body, setBody] = useState(null);
+    const [fits, setFits] = useState(false);
+    useEffect(() => {
+        if (!body) return;
+        const measure = () => setFits(body.scrollHeight <= body.clientHeight + 1);
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(body);
+        for (const child of body.children) observer.observe(child);
+        return () => observer.disconnect();
+    }, [body, children]);
+    useEffect(() => {
+        if (!open) return;
+        openSheets += 1;
+        document.documentElement.classList.add('sheet-open');
+        return () => {
+            openSheets -= 1;
+            if (!openSheets) document.documentElement.classList.remove('sheet-open');
+        };
+    }, [open]);
+    const dragFromBody = event => {
+        if (fits && !event.target.closest('input, textarea, select, [contenteditable="true"]')) drag.start(event);
+    };
     return <AnimatePresence onExitComplete={() => dialog.current?.open && dialog.current.close()}>
         {open && <dialog key="sheet" ref={dialog} className="sheet-dialog" aria-labelledby={labelledBy || headingId}
             onCancel={event => { event.preventDefault(); close(); }}>
@@ -155,7 +181,7 @@ export function Sheet({ open, onClose, title, busy = false, children, actions, l
                         <h2 id={headingId}>{title}</h2>
                         <button className="sheet-close" type="button" aria-label="关闭" onClick={close} disabled={busy}><Icon name="close" /></button>
                     </div>}
-                    <div className="sheet-body">{children}</div>
+                    <div ref={setBody} className={`sheet-body${fits ? ' fits' : ''}`} onPointerDown={dragFromBody}>{children}</div>
                     {actions && <div className={`sheet-actions${Array.isArray(actions) && actions.length === 2 ? ' two' : ''}`}>{actions}</div>}
                 </motion.div>
             </div>

@@ -452,23 +452,28 @@ button.row:not(:disabled):active, a.row:active { background: var(--card-2); }
 .disclosure[aria-expanded='true'] svg { transform: rotate(90deg); }
 
 /* ------------------------------------------------------------ 底部面板与菜单 */
-.sheet-scrim { position: fixed; inset: 0; z-index: 60; background: var(--scrim); }
+.sheet-scrim { position: fixed; inset: 0; z-index: 60; background: var(--scrim); touch-action: none; }
+/* 面板打开时锁住后面的页面：在面板上滑动不会带着后面的列表一起滚 */
+html.sheet-open, html.sheet-open body,
+html.sheet-open .page-stack, html.sheet-open .split-list, html.sheet-open .companion-scroll { overflow: hidden; overscroll-behavior: none; }
 .sheet-dialog { position: fixed; inset: auto 0 0; margin: 0; padding: 0; border: 0; background: none; max-width: none; max-height: none; width: 100%; height: 100%; overflow: visible; color: var(--label); }
 .sheet-dialog::backdrop { background: transparent; }
 .sheet-host { position: fixed; inset: 0; z-index: 61; display: flex; align-items: flex-end; justify-content: center; pointer-events: none; }
 .sheet {
     pointer-events: auto; position: relative; width: min(560px, 100%); max-height: calc(100dvh - var(--safe-top) - 24px);
     display: flex; flex-direction: column;
-    border-radius: 28px 28px 0 0; padding: 8px 0 calc(var(--safe-bottom) + 16px);
+    border-radius: 28px 28px 0 0; padding: 0 0 calc(var(--safe-bottom) + 16px);
     overflow: hidden;
 }
 @media (min-width: 700px) { .sheet-host { align-items: center; } .sheet { border-radius: 28px; padding-bottom: 18px; } }
-.sheet-grabber { width: 38px; height: 5px; margin: 0 auto 6px; border-radius: 3px; background: var(--label-3); flex: none; cursor: grab; touch-action: none; }
-.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 16px 8px 20px; flex: none; }
+.sheet-grabber { height: 20px; flex: none; display: flex; align-items: center; justify-content: center; cursor: grab; touch-action: none; }
+.sheet-grabber::before { content: ''; width: 38px; height: 5px; border-radius: 3px; background: var(--label-3); }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 16px 8px 20px; flex: none; touch-action: none; }
 .sheet-head h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.015em; }
 .sheet-close { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--fill); color: var(--label-2); }
 .sheet-close svg { width: 15px; height: 15px; }
 .sheet-body { padding: 4px 20px 8px; overflow-y: auto; overscroll-behavior: contain; }
+.sheet-body.fits { touch-action: none; }
 .sheet-body p { margin: 0 0 12px; color: var(--label-2); font-size: 15px; line-height: 1.5; }
 .sheet-actions { display: grid; gap: 10px; padding: 12px 20px 0; flex: none; }
 .sheet-actions.two { grid-template-columns: 1fr 1fr; }
