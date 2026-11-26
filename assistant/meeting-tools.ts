@@ -161,10 +161,10 @@ export default function meetingTools(pi: ExtensionAPI) {
     name: "save_summary",
     label: "提交会议摘要",
     description:
-      "提交本场会议的会议摘要（必须调用；重新生成时也要提交完整内容）。各节的写法以纪要规范 meeting-minutes 为准。",
+      "提交本场会议的会议摘要（必须调用；重新生成时也要提交完整内容）。各节的写法以纪要规范 meeting-minutes 为准：字越少越好，每条一句短语，没有内容的节给空数组。",
     promptSnippet: "save_summary：按纪要规范提交结构化的会议摘要（必须调用）",
     parameters: Type.Object({
-      summary: text_("一句话总结"),
+      summary: text_("一句话总结，50 字以内"),
       decisions: Type.Array(
         Type.Object({ decision: text_("决定"), reason: Type.Optional(text_("理由")) }),
         { description: "决定；没有就给空数组" },
@@ -180,7 +180,7 @@ export default function meetingTools(pi: ExtensionAPI) {
       ),
       discussion: Type.Array(
         Type.Object({ topic: text_("议题"), points: list("要点") }),
-        { description: "讨论要点，按议题归纳" },
+        { description: "讨论要点；默认给空数组，只有不写就看不懂决定时才写，最多 3 个议题" },
       ),
       open_questions: list("待定事项；没有就给空数组"),
       cautions: Type.Object(
