@@ -65,8 +65,8 @@ MEETING_MAX_SECONDS = max(1, int(float(os.environ.get('MEETING_MAX_HOURS', '12')
 # Let the final timeslice arrive after MediaRecorder.stop(), even on mobile.
 MEETING_UPLOAD_GRACE_SECONDS = 15
 # 到了最长时长之后，手机还在补传积压的录音（网络差时会落后很多）：只要还在传就一直收，
-# 停传这么久才认为传完了，再自动保存。录音在手机上先存着，服务器不该替它决定丢掉哪些。
-MEETING_LATE_UPLOAD_IDLE_SECONDS = 30 * 60
+# 停传这么久（1 小时）才认为传完了，再自动保存。录音在手机上先存着，服务器不该替它决定丢掉哪些。
+MEETING_LATE_UPLOAD_IDLE_SECONDS = 60 * 60
 # A session is provisional until its first audio part, not proof of a working microphone.
 MEETING_EMPTY_START_GRACE_SECONDS = 180
 # A stop from another device gives the recorder a bounded window to flush its tail.

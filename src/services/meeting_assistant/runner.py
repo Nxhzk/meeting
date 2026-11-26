@@ -39,6 +39,7 @@ class AssistantUnavailable(RuntimeError):
 
 class AssistantRunFailed(RuntimeError):
     """pi 进程异常退出、超时或模型调用出错。"""
+    crashed = False   # pi 进程自己崩了（比如内存不够），重跑一次通常就好
 
 
 class AssistantCanceled(RuntimeError):
@@ -409,7 +410,9 @@ def _execute(command, env, cwd, timeout, parts, report, cancel_requested, trace=
     if process.returncode != 0 and result.summary is None:
         tail = '\n'.join(stderr_tail[-8:])
         logger.warning('pi exited with %s: %s', process.returncode, tail)
-        raise AssistantRunFailed(result.error or f'会议助手异常退出（{process.returncode}）。{_short(tail)}')
+        failure = AssistantRunFailed(result.error or f'会议助手异常退出（{process.returncode}）。{_short(tail)}')
+        failure.crashed = result.error is None
+        raise failure
     return result
 
 

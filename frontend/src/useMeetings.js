@@ -70,7 +70,7 @@ export function useMeetings(enabled, syncLive, fastPoll) {
         if (!enabled || loading || data.error === 'login') return;
         const timer = setTimeout(() => {
             if (!document.hidden) load();
-        }, data.live.length || fastPoll ? 3000 : data.cards.some(card => processing.has(card.phase)) ? 4000 : 8000);
+        }, data.live.length || fastPoll ? 5000 : data.cards.some(card => processing.has(card.phase)) ? 6000 : 15000);
         return () => clearTimeout(timer);
     }, [data, enabled, fastPoll, load, loading]);
 

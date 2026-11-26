@@ -99,6 +99,9 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
     private val stateFile = File(root, "state.json")
     private val thread = HandlerThread("meeting-recorder").apply { start() }
     private val handler = Handler(thread.looper)
+    // 看门狗：信号断断续续时，写请求体可能一直卡着（Java 的写操作没有超时），上传线程就停了。
+    // 超过 90 秒强制断开，让它报错重试。
+    private val watchdog = HandlerThread("meeting-upload-watchdog").apply { start() }.let { Handler(it.looper) }
     private val audio = context.getSystemService(AudioManager::class.java)
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
 
@@ -170,7 +173,8 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
     // ---------------------------------------------------------------- 命令（来自前台服务）
 
     /** 开始（或接着）录一个会议。同一个会议再调一次 = 接着录。 */
-    fun start(session: String, base: String, cookie: String, csrf: String, startedAt: Long, endsAt: Long, nextIndex: Int) =
+    fun start(session: String, base: String, cookie: String, csrf: String, startedAt: Long, endsAt: Long, nextIndex: Int,
+              remote: String? = null) =
         handler.post {
             val current = state
             if (current != null && current.session == session && !current.finished) {
@@ -189,7 +193,8 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
                 dir(current.session).deleteRecursively()
             }
             dir(session).mkdirs()
-            state = RecState(session, base, cookie, csrf, startedAt, endsAt, max(1, nextIndex)).apply {
+            // remote 为空：服务器上的会议还没建，录音先开始，上传线程联网后再建
+            state = RecState(session, base, cookie, csrf, startedAt, endsAt, max(1, nextIndex), remote = remote ?: session).apply {
                 if (nextIndex <= 1) { serverNext = 1; serverBytes = 0 }
             }
             uploaded = max(1, nextIndex) - 1
@@ -214,6 +219,36 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
         reopenTries = 0
         if (media == null) openSegment(resumed = true)
         publish()
+    }
+
+    /**
+     * 录音进程被系统杀掉后又被系统拉起（服务已回到前台）：试着直接重开麦克风接着录。
+     * 有的系统不允许后台重开麦克风——那样录到的是被系统静音的空白，检测到就停下，
+     * 回到「等用户回来」并响铃提醒（[onBlocked]）。
+     */
+    fun resumeAfterRestart(onBlocked: () -> Unit) = handler.post {
+        val s = state ?: return@post
+        if (s.finished || s.ended || media != null || pauseReason != "restart") return@post
+        Log.i(TAG, "Restarted by the system: reopening the microphone")
+        openSegment(resumed = true)
+        handler.postDelayed({
+            val recorder = media
+            val muted = recorder == null || (Build.VERSION.SDK_INT >= 29 &&
+                (try { recorder.activeRecordingConfiguration?.isClientSilenced } catch (_: Exception) { null } ?: false) &&
+                audio.mode == AudioManager.MODE_NORMAL)
+            Log.i(TAG, "Microphone after restart: ${if (recorder == null) "not open" else if (muted) "muted by the system" else "recording"}")
+            if (muted) {
+                if (recorder != null) {
+                    closeRecorder()
+                    markGapStart()
+                    silenced = false
+                    phase = "paused"
+                    pauseReason = "restart"
+                    publish()
+                }
+                onBlocked()
+            }
+        }, 2_000)
     }
 
     fun refreshAuth(cookie: String?, csrf: String?) = handler.post {
@@ -498,7 +533,7 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
             put("type", "status")
             put("state", if (s == null) "idle" else phase)
             if (s != null) {
-                put("session", s.session); put("startedAt", s.startedAt); put("endsAt", s.endsAt)
+                put("session", s.session); put("remote", s.remote); put("startedAt", s.startedAt); put("endsAt", s.endsAt)
                 put("ended", s.ended); put("automatic", s.automatic); put("interrupted", s.interrupted)
                 put("gapMs", s.gapMs + if (silencedSince > 0) System.currentTimeMillis() - silencedSince else 0)
                 put("chunks", s.nextIndex - 1); put("uploaded", uploaded); put("pending", pendingChunks().size)
@@ -537,6 +572,7 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
                 try {
                     when {
                         s == null || s.finished -> sleep(60_000)
+                        s.remote.isEmpty() -> createRemote(s)
                         s.serverNext <= 0 || s.serverBytes < 0 -> reconcile(s)
                         next.isNotEmpty() -> upload(s, next)
                         s.ended && media == null -> finalize(s)
@@ -584,6 +620,7 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
                 code in 200..299 -> {
                     acked(s, picked, index + 1, s.serverBytes + bytes.size)
                     batch = min(MAX_BATCH, batch * 2)
+                    if (body.optBoolean("end_requested")) endRequestedElsewhere(s)
                 }
                 code == 409 && body.optBoolean("meeting_closed") -> closed(s, body)
                 code == 409 && body.has("expected_chunk_index") -> reconcile(s)
@@ -609,6 +646,7 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
             if (code == 404) return finished(s, s.firstRecordingId, "这场会议已不在服务器上。")
             if (code !in 200..299) throw HttpError(code, status.optString("error"))
             if (status.optString("status") != "recording") return closed(s, status)
+            if (status.optBoolean("end_requested")) endRequestedElsewhere(s)
             val count = status.optInt("chunk_count")
             val bytes = status.optLong("bytes_received")
             val pending = pendingChunks(s.session)
@@ -638,42 +676,67 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
             }
         }
 
-        /** 服务器不再收这场会议（被别处结束、到了最长时长、或已删除）。 */
+        /** 会议在别的设备上点了结束：停止录音，剩下的照常传完、自己保存（同一场会议）。 */
+        private fun endRequestedElsewhere(s: RecState) {
+            if (s.ended) return
+            Log.i(TAG, "Meeting ${s.remote.take(8)} was ended on another device")
+            handler.post { if (!s.ended) endInternal(automatic = false) }
+        }
+
+        /** 在服务器上建会议（开始录音时不等网络，联网后在这里补建）。 */
+        private fun createRemote(s: RecState) {
+            // recorder=2：告诉服务器结束时等手机传完再保存；started_at：会议时间按真正开录的时间
+            val (code, created) = request(s, "POST", "upload/session",
+                """{"mime_type":"$MIME","meeting_mode":true,"recorder":2,"started_at":${s.startedAt}}""".toByteArray(), "application/json")
+            val id = created.optString("session_id")
+            if (code !in 200..299 || id.isEmpty()) throw HttpError(code, created.optString("error"))
+            s.remote = id
+            s.serverNext = 1
+            s.serverBytes = 0
+            saveState()
+            Log.i(TAG, "Meeting ${s.session.take(8)} is ${id.take(8)} on the server")
+            handler.post { publish() }
+        }
+
+        /**
+         * 服务器不再收这场会议。手机上的录音是唯一的原件，规则是：
+         * - 会议被用户在别处结束（finalizing/finalized）：停止录音；手机上没传完的（30 秒以上）另存一场；
+         * - 会议被用户删除（aborted）：停止录音，丢弃——这是用户自己的决定；
+         * - 其他（比如一开会就没网，服务器把「一直没声音」的会议清理掉了 expired）：
+         *   录音照常继续，换一场新的服务器会议接着传，一秒都不丢。
+         */
         private fun closed(s: RecState, body: JSONObject) {
             val status = body.optString("status")
             val leftover = pendingChunks(s.session)
             Log.w(TAG, "Server closed meeting ${s.remote.take(8)}: $status, ${leftover.size} chunks left on the phone")
-            handler.post {
+            val endedByUser = status in setOf("finalizing", "finalized", "aborted")
+            if (endedByUser) handler.post {
                 s.automatic = s.automatic || body.optBoolean("meeting_limit_reached")
                 if (!s.ended) endInternal(automatic = body.optBoolean("meeting_limit_reached"))
             }
-            if (status in setOf("finalizing", "finalized") && leftover.size >= CONTINUE_MIN_CHUNKS) {
-                // 手机上还有没传上去的录音：不丢，另开一场接着存（会议列表里会多一条「续」）
+            if (status == "aborted") {
+                for ((_, f) in leftover) f.delete()
+                if (s.firstRecordingId != null) return finished(s, s.firstRecordingId, null)
+                return finished(s, null, "这场会议已被删除。")
+            }
+            if (endedByUser) {
                 val (_, old) = request(s, "GET", "upload/session/${s.remote}", null, null)
-                val (code, created) = request(s, "POST", "upload/session",
-                    """{"mime_type":"$MIME","meeting_mode":true}""".toByteArray(), "application/json")
-                val id = created.optString("session_id")
-                if (code !in 200..299 || id.isEmpty()) throw HttpError(code, created.optString("error"))
-                if (s.firstRecordingId == null && old.optLong("finalized_recording_id", -1) > 0)
-                    s.firstRecordingId = old.getLong("finalized_recording_id")
-                s.remote = id
-                s.serverNext = 1
-                s.serverBytes = 0
+                val id = old.optLong("finalized_recording_id", -1).takeIf { it > 0 }
+                if (s.firstRecordingId == null) s.firstRecordingId = id
+                if (leftover.size < CONTINUE_MIN_CHUNKS) {
+                    // 只剩几秒零头（结束那一下多录的）：不单独存一条
+                    if (leftover.isNotEmpty()) handler.post { s.interrupted = true }
+                    for ((_, f) in leftover) f.delete()
+                    return finished(s, s.firstRecordingId, if (s.firstRecordingId == null) "这场会议已经结束，没有可保存的录音。" else null)
+                }
                 handler.post { s.interrupted = true }
-                saveState()
-                Log.w(TAG, "Continuing ${leftover.size} chunks in ${id.take(8)}")
-                return
+                Log.w(TAG, "Saving ${leftover.size} chunks left on the phone as a follow-up meeting")
             }
-            // 会议被删除/放弃，或只剩零头：服务器上已有的照样保存，手机上的丢弃
-            if (leftover.isNotEmpty()) handler.post { s.interrupted = true }
-            for ((_, f) in leftover) f.delete()
-            if (status in setOf("finalizing", "finalized")) {
-                val (_, old) = request(s, "GET", "upload/session/${s.remote}", null, null)
-                val id = old.optLong("finalized_recording_id", -1)
-                return finished(s, s.firstRecordingId ?: id.takeIf { it > 0 }, null)
-            }
-            if (s.firstRecordingId != null) return finished(s, s.firstRecordingId, null)
-            return finished(s, null, "这场会议已经结束，没有可保存的录音。")
+            // 换一场新的服务器会议接着传（上传线程下一轮会先建会议）
+            s.remote = ""
+            s.serverNext = 0
+            s.serverBytes = -1
+            saveState()
         }
 
         private fun finalize(s: RecState) {
@@ -754,6 +817,8 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
 
     private fun send(s: RecState, method: String, path: String, body: ByteArray?, type: String?): Pair<Int, JSONObject> {
         val connection = URL(s.base + path).openConnection() as HttpURLConnection
+        val cutOff = Runnable { Log.w(TAG, "Request $method $path took too long, cutting it off"); connection.disconnect() }
+        watchdog.postDelayed(cutOff, 90_000)
         try {
             connection.requestMethod = method
             connection.connectTimeout = 10_000
@@ -780,6 +845,8 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
         } catch (e: IOException) {
             connection.disconnect()
             throw e
+        } finally {
+            watchdog.removeCallbacks(cutOff)
         }
     }
 }

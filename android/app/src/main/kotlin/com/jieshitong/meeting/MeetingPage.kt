@@ -56,7 +56,8 @@ object MeetingPage {
     })();"""
 
     /** 页面加载前注入：这个 App 支持原生录音（协议版本 1）。 */
-    const val NATIVE_FLAG_JS = "window.__jstNativeRecorder = 1;"
+    // 2：录音器能先在手机上开录、联网后再建服务器会议（页面据此决定开会时要不要先等服务器）
+    const val NATIVE_FLAG_JS = "window.__jstNativeRecorder = 2;"
 
     const val END_JS = """(function(){
         var c = document.getElementById('meeting-control');

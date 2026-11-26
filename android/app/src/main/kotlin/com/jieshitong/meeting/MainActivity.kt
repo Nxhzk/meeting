@@ -276,6 +276,7 @@ class MainActivity : AppCompatActivity() {
                         putExtra("startedAt", command.optLong("startedAt"))
                         putExtra("endsAt", command.optLong("endsAt"))
                         putExtra("nextIndex", command.optInt("nextIndex", 1))
+                        if (command.has("remote")) putExtra("remote", command.optString("remote"))
                     }
                 },
                 denied = { deliverToPage(org.json.JSONObject().put("type", "error").put("error", "permission").toString()) },

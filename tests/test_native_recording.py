@@ -129,7 +129,7 @@ class NativeRecordingStitchTest(unittest.TestCase):
         self.assertAlmostEqual(float(self.probe(path)['format']['duration']), 12.0, delta=0.5)
 
     def test_meeting_past_the_limit_keeps_taking_the_backlog(self):
-        # 到了最长时长，手机还在补传积压的录音：继续收；停传 30 分钟以上才自动保存
+        # 到了最长时长，手机还在补传积压的录音：继续收；停传 1 小时以上才自动保存
         from datetime import datetime, timedelta
         from src.api.recording_sessions import cleanup_due_meetings
         from src.database import db
@@ -149,7 +149,7 @@ class NativeRecordingStitchTest(unittest.TestCase):
         with self.app.app_context():
             s = db.session.get(RecordingSession, session_id)
             self.assertEqual(s.status, 'recording')
-            s.last_seen_at = datetime.utcnow() - timedelta(minutes=31)
+            s.last_seen_at = datetime.utcnow() - timedelta(minutes=61)
             db.session.commit()
         closed = client.post(f'/upload/session/{session_id}/chunks/3', data=parts[2], content_type='application/octet-stream')
         self.assertEqual(closed.status_code, 409)
@@ -159,6 +159,42 @@ class NativeRecordingStitchTest(unittest.TestCase):
             s = db.session.get(RecordingSession, session_id)
             self.assertIn(s.status, ('finalizing', 'finalized'))
             self.assertEqual(s.chunk_count, 2)
+
+
+    def test_ending_elsewhere_lets_the_phone_finish_the_same_meeting(self):
+        # 在别的设备上点结束：服务器不抢先收尾，上传的回复告诉手机结束，手机传完后自己保存——只有一场会议
+        from datetime import datetime, timedelta
+        from src.api.recording_sessions import cleanup_due_meetings
+        from src.database import db
+        from src.models.recording_session import RecordingSession
+        client = self.client()
+        parts = self.chunks(3)
+        import time as _time
+        started = int(_time.time() * 1000) - 600_000
+        created = client.post('/upload/session', json={'mime_type': 'audio/aac', 'meeting_mode': True,
+                                                       'recorder': 2, 'started_at': started}).get_json()
+        session_id = created['session_id']
+        self.assertEqual(client.post(f'/upload/session/{session_id}/chunks/1', data=parts[0],
+                                     content_type='application/octet-stream').status_code, 204)
+        with self.app.app_context():
+            s = db.session.get(RecordingSession, session_id)
+            self.assertLess(abs((s.created_at - datetime.utcfromtimestamp(started / 1000)).total_seconds()), 2)
+        self.assertEqual(client.post(f'/api/meetings/live/{session_id}/end', json={}).status_code, 202)
+        with self.app.app_context():
+            s = db.session.get(RecordingSession, session_id)
+            import json as _json
+            meta = _json.loads(s.finalize_metadata)
+            meta['meeting_stop_requested_at'] = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
+            s.finalize_metadata = _json.dumps(meta)
+            db.session.commit()
+        cleanup_due_meetings(self.app)
+        reply = client.post(f'/upload/session/{session_id}/chunks/2', data=parts[1], content_type='application/octet-stream')
+        self.assertEqual(reply.status_code, 200)
+        self.assertTrue(reply.get_json()['end_requested'])
+        self.assertEqual(client.post(f'/upload/session/{session_id}/chunks/3', data=parts[2],
+                                     content_type='application/octet-stream').status_code, 200)
+        path = self.stitch(client, session_id)
+        self.assertAlmostEqual(float(self.probe(path)['format']['duration']), 12.0, delta=0.5)
 
 
 if __name__ == '__main__':

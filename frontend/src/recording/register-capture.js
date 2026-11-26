@@ -376,6 +376,46 @@ export class MeetingCapture {
     }
 
     async startNative({ automatic = false } = {}) {
+        if (!(window.__jstNativeRecorder >= 2)) return this.startNativeLegacy({ automatic });
+        if (!automatic) this.notice('');
+        const resuming = this.mode === 'paused' && this.session;
+        this.show('opening');
+        try {
+            if (!await this.lock()) return this.show('other');
+            if (!resuming && this.pointer()) return this.restore(false);
+            if (resuming) {
+                // 接着录：录音器在手机上，直接让它重开麦克风，不用先问服务器
+                this.nativeStarting = { resuming: true };
+                clearTimeout(this.nativeStartTimer);
+                this.nativeStartTimer = setTimeout(() => this.abortNativeStart('没能接着录音，请再试一次。'), NATIVE_START_TIMEOUT_MS);
+                this.nativeSend({ cmd: 'rec.resume', csrf: currentCsrf() });
+                return;
+            }
+            // 点了「开始会议」就立刻在手机上开录：不等服务器、不需要网络。
+            // 服务器上的会议由录音器在后台建（断网就等联网再建），录音先存在手机里。
+            // 之所以不能先等服务器：等回复的这一两秒里人已经锁屏了，安卓不允许后台再打开麦克风。
+            const id = (crypto.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-local`).toLowerCase();
+            const startedAt = Date.now();
+            this.session = { id, remote: '', startedAt, endsAt: startedAt + MAX_MEETING_MS, mime: NATIVE_MIME, ended: false, interrupted: false };
+            this.monotonicEnd = performance.now() + MAX_MEETING_MS;
+            this.savePointer();
+            this.sequence = 0; this.queue = [];
+            this.setNativeActive(true);
+            this.startNativeWatch();
+            this.nativeStarting = { resuming: false };
+            clearTimeout(this.nativeStartTimer);
+            this.nativeStartTimer = setTimeout(() => this.abortNativeStart('没能开始录音，请再试一次。'), NATIVE_START_TIMEOUT_MS);
+            this.nativeSend({
+                cmd: 'rec.start', session: id, remote: '', base: `${location.origin}${apiUrl('')}/`, csrf: currentCsrf(),
+                startedAt, endsAt: this.session.endsAt, nextIndex: 1,
+            });
+        } catch (error) {
+            this.abortNativeStart('没能开始录音，请再试一次。');
+        }
+    }
+
+    // 旧版 App（录音器必须先有服务器会议）：先建会议再开录
+    async startNativeLegacy({ automatic = false } = {}) {
         if (!automatic) this.notice('');
         const resuming = this.mode === 'paused' && this.session;
         this.show('opening');
@@ -428,7 +468,8 @@ export class MeetingCapture {
         }
         if (this.session) {
             const { id } = this.session;
-            request(sessionPath(id), { method: 'DELETE' }).catch(() => {});
+            const remote = this.session.mime === NATIVE_MIME ? this.session.remote : id;
+            if (remote) request(sessionPath(remote), { method: 'DELETE' }).catch(() => {});
             this.forget(id);
             this.session = null;
         }
@@ -459,13 +500,14 @@ export class MeetingCapture {
         // 页面刷新、被系统重建、从通知栏回来：原生录音器里有会议，页面接上它
         if (!this.session || this.session.id !== status.session) {
             if (this.session && ['opening', 'recording', 'paused', 'saving'].includes(this.mode)) return;
-            this.session = { id: status.session, startedAt: status.startedAt, endsAt: status.endsAt, mime: NATIVE_MIME,
+            this.session = { id: status.session, remote: status.remote ?? status.session, startedAt: status.startedAt, endsAt: status.endsAt, mime: NATIVE_MIME,
                 ended: Boolean(status.ended), interrupted: Boolean(status.interrupted), automatic: Boolean(status.automatic) };
             this.monotonicEnd = performance.now() + Math.max(0, status.endsAt - Date.now());
             this.savePointer();
             this.setNativeActive(true);
         }
         const session = this.session;
+        if (status.remote && session.remote !== status.remote) { session.remote = status.remote; this.savePointer(); }
         this.startNativeWatch();
         if (status.interrupted && !session.interrupted) { session.interrupted = true; this.savePointer(); }
         if (status.automatic && !session.automatic) { session.automatic = true; this.savePointer(); }
@@ -750,15 +792,19 @@ export class MeetingCapture {
     }
 
     syncLive(rows) {
-        const id = this.session?.id;
+        // 原生录音：页面里的编号是手机上的，服务器上的编号由录音器建好后告诉页面（还没建好就不对账）
+        const id = this.session?.mime === NATIVE_MIME && this.native && this.session.remote !== undefined ? this.session.remote : this.session?.id;
         if (!id || !['recording','paused'].includes(this.mode)) return;
         const row = rows.find(row => row.id === id);
         if (row?.end_requested) { this.stop(); return; }
         // A list response may predate creation. Confirm absence by ID before stopping.
         if (row || this.checkingRemote) return;
         this.checkingRemote = true;
+        const local = this.session.id;
         request(sessionPath(id)).then(state => {
-            if (this.session?.id !== id || !['recording','paused'].includes(this.mode)) return;
+            if (this.session?.id !== local || !['recording','paused'].includes(this.mode)) return;
+            // 原生录音的服务器会议没了：录音器自己会另存，这里不替它结束
+            if (this.isNativeSession()) return;
             if (state.status !== 'recording') this.finish(state.finalized_recording_id || null, '会议已结束。');
             else if (state.end_requested) this.stop();
         }).catch(() => {}).finally(() => { this.checkingRemote = false; });

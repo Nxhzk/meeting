@@ -357,6 +357,16 @@ def _replay_finalize_response(session):
     }), 202
 
 
+NATIVE_RECORDER_KEY = 'native_recorder'
+
+
+def _is_native_recorder(session):
+    try:
+        return json.loads(session.finalize_metadata or '{}').get(NATIVE_RECORDER_KEY) == 2
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _meeting_upload_cutoff():
     return datetime.utcnow() - timedelta(seconds=MEETING_MAX_SECONDS + MEETING_UPLOAD_GRACE_SECONDS)
 
@@ -460,6 +470,16 @@ def create_session():
         upload_total_bytes=total_bytes,
         status='recording',
     )
+    if kind == 'meeting' and data.get('recorder') == 2:
+        # 新版安卓录音器：先在手机上开录，联网后才建这场会议。记下它（结束时由它自己传完再保存），
+        # 并用真正开始录音的时间作为会议时间（断网时会议可能晚很久才建到服务器上）。
+        session.finalize_metadata = json.dumps({NATIVE_RECORDER_KEY: 2})
+        try:
+            started = datetime.utcfromtimestamp(int(data.get('started_at')) / 1000)
+            if datetime.utcnow() - timedelta(seconds=MEETING_MAX_SECONDS) < started <= datetime.utcnow():
+                session.created_at = started
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
     db.session.add(session)
     db.session.commit()
 
@@ -617,6 +637,10 @@ def upload_chunk(session_id, chunk_index):
 
     if is_meeting:
         db.session.commit()
+        if session.meeting_stop_requested_at and _is_native_recorder(session):
+            # 会议在别的设备上点了结束：告诉手机录音器，它会停止录音、传完剩下的再自己保存，
+            # 全部录音进同一场会议
+            return jsonify({'end_requested': True}), 200
         return ('', 204)
 
     session.chunk_count = chunk_index
@@ -1051,7 +1075,11 @@ def cleanup_due_meetings(app):
         for meeting in meetings:
             session_id = meeting.id
             stop_at = meeting.meeting_stop_requested_at
-            end_due = (meeting.created_at <= hour_cutoff and meeting.last_seen_at <= idle_cutoff) or (stop_at is not None and stop_at <= stop_cutoff)
+            # 安卓 App 的录音器（AAC）收到「结束」后自己传完再保存：服务器不抢在它前面收尾，
+            # 否则手机上还没传完的录音只能另存成第二场会议。它很久都不再上传（手机没了）才由服务器保存。
+            native = _is_native_recorder(meeting)
+            stop_due = stop_at is not None and stop_at <= stop_cutoff and (not native or meeting.last_seen_at <= idle_cutoff)
+            end_due = (meeting.created_at <= hour_cutoff and meeting.last_seen_at <= idle_cutoff) or stop_due
             if not end_due and (meeting.chunk_count or meeting.bytes_received or meeting.last_seen_at > empty_cutoff or stop_at):
                 continue
             try:

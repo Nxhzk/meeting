@@ -51,5 +51,32 @@ class RegenerateLegacyMeetingTest(unittest.TestCase):
             self.assertEqual([(v.version, v.source) for v in legacy], [(1, 'legacy')])
 
 
+    def test_a_crashed_assistant_is_retried_once(self):
+        # 会议助手进程偶尔崩溃（内存瞬间不够）：自动再跑一次，不需要用户点「重新生成」
+        from types import SimpleNamespace
+        from src.services.meeting_assistant import runner, service
+        from src.tasks import processing
+        crash = runner.AssistantRunFailed('会议助手异常退出（134）。')
+        crash.crashed = True
+        done = SimpleNamespace(version=2, duration_seconds=1, markdown='## 摘要')
+        with mock.patch.object(service, 'generate', side_effect=[crash, done]) as generate, \
+                mock.patch.object(processing, 'finish_processing', return_value=None), \
+                mock.patch('src.services.webhook_dispatch.emit_summary_result', return_value=None):
+            processing.generate_summary_only_task(self.app.app_context(), self.recording_id)
+        self.assertEqual(generate.call_count, 2)
+
+    def test_a_model_error_is_not_retried(self):
+        from src.services.meeting_assistant import runner, service
+        from src.tasks import processing
+        failure = runner.AssistantRunFailed('模型调用失败：400')
+        with mock.patch.object(service, 'generate', side_effect=[failure]) as generate, \
+                mock.patch('src.services.webhook_dispatch.emit_summary_result', return_value=None):
+            try:
+                processing.generate_summary_only_task(self.app.app_context(), self.recording_id)
+            except Exception:
+                pass
+        self.assertEqual(generate.call_count, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

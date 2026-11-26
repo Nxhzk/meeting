@@ -32,6 +32,7 @@ class NativeRecordingService : Service() {
     companion object {
         private const val TAG = "RecordingService"
         private const val CHANNEL = "meeting"
+        private const val ALERT_CHANNEL = "meeting-alert"
         private const val NOTIFICATION_ID = 1
         private const val MAX_WAKE_MS = 2 * 60 * 60 * 1000L
 
@@ -98,6 +99,8 @@ class NativeRecordingService : Service() {
         // 开始录音、网页录音模式、有进行中的会议时要待在前台（startForegroundService 之后 5 秒内必须进入前台）
         val needsForeground = action in setOf(ACTION_START, ACTION_RESUME) || recorder.busy
         if (needsForeground && !ensureForeground()) {
+            // 系统把录音进程杀了又在后台拉起来：安卓不允许后台重新打开麦克风，只能响铃提醒用户回来
+            if (recorder.busy && action == null) notifyInterrupted()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -108,6 +111,8 @@ class NativeRecordingService : Service() {
                 intent.getLongExtra("startedAt", System.currentTimeMillis()),
                 intent.getLongExtra("endsAt", System.currentTimeMillis() + 3_600_000),
                 intent.getIntExtra("nextIndex", 1),
+                // 新版页面不先建服务器会议，传空的 remote；旧版页面不传，沿用 session
+                if (intent.hasExtra("remote")) intent.getStringExtra("remote").orEmpty() else null,
             )
             ACTION_STOP -> recorder.stop()
             ACTION_RESUME -> recorder.resume(intent!!.getStringExtra("cookie"), intent.getStringExtra("csrf"))
@@ -119,7 +124,11 @@ class NativeRecordingService : Service() {
                 refreshFloating()
                 recorder.requestStatus()
             }
-            null -> recorder.requestStatus() // 系统重启了服务（START_STICKY）
+            null -> {
+                // 系统重启了服务（START_STICKY）：录音进程被杀过。先试着自己接着录，不行就响铃叫人
+                recorder.requestStatus()
+                recorder.resumeAfterRestart { main.post { notifyInterrupted() } }
+            }
         }
         // 只是来查询、确认的，又没有进行中的会议：查完就走，不挂通知
         if (!foreground && !recorder.busy) main.postDelayed({ if (!foreground && !recorder.busy) stopSelf() }, 3_000)
@@ -222,6 +231,27 @@ class NativeRecordingService : Service() {
             }
         }
         .build()
+
+    private fun notifyInterrupted() {
+        NotificationManagerCompat.from(this).createNotificationChannel(
+            NotificationChannelCompat.Builder(ALERT_CHANNEL, NotificationManagerCompat.IMPORTANCE_HIGH)
+                .setName("录音中断提醒")
+                .setDescription("会议录音被系统打断时提醒你回来继续")
+                .build()
+        )
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_mic)
+            .setColor(ContextCompat.getColor(this, R.color.brand_blue))
+            .setContentTitle("会议录音被系统中断了")
+            .setContentText("已录的部分都在手机上。点这里回到会议，会自动接着录。")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setContentIntent(pendingApp(Intent.ACTION_MAIN, 4))
+            .setAutoCancel(true)
+            .build()
+        try { NotificationManagerCompat.from(this).notify(NOTIFICATION_ID + 2, notification) } catch (_: SecurityException) { }
+    }
 
     private fun notifyResult(status: JSONObject) {
         val ok = status.optString("state") == "done"

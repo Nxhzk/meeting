@@ -720,6 +720,15 @@ def exempt_status_endpoints():
     # so IP-based rate limiting is the wrong control here.
     if request.path.startswith('/upload/session'):
         return True
+    # 会议 App 开着时会定时刷新会议列表、录音器要续 CSRF 令牌、别的设备会结束会议：
+    # 一场几小时的会议加上同一出口 IP 的同事，很容易撞上 1000 次/小时的 IP 上限，
+    # 被拦的不只是列表，还有录音续传要用的令牌。这些都只对已登录用户、且有自己的权限检查。
+    if request.path == '/api/csrf-token' and request.method == 'GET':
+        return True
+    if request.path.startswith('/api/meetings'):
+        from flask_login import current_user
+        if current_user.is_authenticated:
+            return True
     # Exempt media playback for signed-in users (#539). A browser reads a
     # recording through HTTP range requests, and a fragmented MP4 (the format
     # OBS writes) costs one request per fragment on load and on every seek:

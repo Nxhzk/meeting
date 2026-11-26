@@ -671,8 +671,17 @@ def generate_summary_only_task(app_context, recording_id, custom_prompt_override
         try:
             control.check_cancel()
             _end_transaction_before_external_call(recording)
-            version = assistant.generate(recording_id, user_id=user_id, feedback=feedback,
-                                         report=control.detail, cancel_requested=control.cancel_requested)
+            try:
+                version = assistant.generate(recording_id, user_id=user_id, feedback=feedback,
+                                             report=control.detail, cancel_requested=control.cancel_requested)
+            except assistant_runner.AssistantRunFailed as crash:
+                # 会议助手进程偶尔崩溃（内存瞬间不够等）：自动重跑一次，不让用户手动点「重新生成」
+                if not crash.crashed:
+                    raise
+                current_app.logger.warning(f"Assistant crashed on recording {recording_id}; retrying once: {crash}")
+                control.check_cancel()
+                version = assistant.generate(recording_id, user_id=user_id, feedback=feedback,
+                                             report=control.detail, cancel_requested=control.cancel_requested)
             _stop_if_recording_replaced(recording_id, loaded_created_at)
             current_app.logger.info(
                 f"Assistant summary v{version.version} for recording {recording_id} in {version.duration_seconds}s")

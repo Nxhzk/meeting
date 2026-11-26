@@ -462,7 +462,7 @@ function Workspace({ config }) {
         setLiveError('');
         try {
             const recorder = capture.current;
-            if (recorder?.session?.id === liveId && ['recording', 'paused'].includes(recorder.mode)) recorder.stop();
+            if ((recorder?.session?.id === liveId || recorder?.session?.remote === liveId) && ['recording', 'paused'].includes(recorder.mode)) recorder.stop();
             else await request(`/api/meetings/live/${encodeURIComponent(liveId)}/end`, { method: 'POST', json: {} });
             setOptimisticEnd(liveId);
             setLiveId(null);
@@ -510,7 +510,7 @@ function Workspace({ config }) {
     const home = <MeetingsHome library={library} loginUrl={config.loginUrl} current={route.detail} openLive={openLive}
         openDetail={openDetail} openDelete={card => { setDeleteError(''); setDeleteTarget(card); }}
         optimisticEnd={optimisticEnd} deleteLocked={mode !== 'idle' || deleting || data.error === 'login'}
-        localSession={['recording', 'paused', 'saving', 'opening'].includes(mode) ? capture.current?.session?.id : null} />;
+        localSession={['recording', 'paused', 'saving', 'opening'].includes(mode) ? (capture.current?.session?.remote || capture.current?.session?.id) : null} />;
     const companionPage = <CompanionPage key="assistant" companion={companion}
         openMeeting={id => go(`#meeting-${id}`, { tab: 'meetings', detail: id, origin: 'assistant' })}
         onBack={closeAssistant} onGrab={event => drawerDrag.start(event)} />;
