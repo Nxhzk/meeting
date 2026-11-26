@@ -362,8 +362,8 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
     const [menu, setMenu] = useState(false);
     const [confirmClear, setConfirmClear] = useState(false);
     const [clearing, setClearing] = useState(false);
-    // 输入方式：text 打字 | voice 按住说话（和豆包一样，点按钮切换；记住上次用的）
-    const [inputMode, setInputModeState] = useState(() => { try { return localStorage.getItem('jst-assistant-input') === 'voice' ? 'voice' : 'text'; } catch { return 'text'; } });
+    // 输入方式：voice 按住说话（默认）| text 打字。和豆包一样点按钮切换，记住上次用的
+    const [inputMode, setInputModeState] = useState(() => { try { return localStorage.getItem('jst-assistant-input') === 'text' ? 'text' : 'voice'; } catch { return 'voice'; } });
     const setInputMode = mode => {
         setInputModeState(mode);
         try { localStorage.setItem('jst-assistant-input', mode); } catch { /* 记不住也能用 */ }
@@ -561,6 +561,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
     // 没发出去的消息「编辑」：从列表里撤下，文字放回输入框
     function edit(item) {
         companion.discard(item.client_id);
+        setInputMode('text');   // 文字放回输入框：语音模式下输入框是藏起来的
         setText(text.trim() ? `${text}\n${item.content}` : item.content);
         requestAnimationFrame(() => { resize(); field.current?.focus(); });
     }
@@ -672,7 +673,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
             {voiceMode
                 ? <HoldToTalk blockedReason={meetingBusy ? '正在开会录音，麦克风被占用，会议结束后再用语音输入。' : ''}
                     onError={message => toast(message, 'bad')}
-                    onText={spoken => send(text.trim() ? `${text} ${spoken}` : spoken)} />
+                    onText={spoken => send(spoken)} />
                 : <textarea ref={field} rows={1} value={text} placeholder="问问小助理…"
                     onChange={event => { setText(event.target.value); resize(); }}
                     onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />}
