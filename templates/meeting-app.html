@@ -20,7 +20,19 @@
     {% if unavailable %}
     <main><h1>会议页面暂不可用</h1><p>前端资源尚未部署，请稍后重试。</p></main>
     {% else %}
-    <div id="root"></div>
+    <div id="root">
+        {# 页面脚本下载完之前先显示加载动画（样式已在上面加载），React 渲染时会替换掉这里 #}
+        <div class="boot-splash" role="status" aria-label="正在加载">
+            <span class="jst-loader" data-tone="brand" style="width:56px;height:56px">
+                <svg viewBox="0 0 106 104" width="56" height="56"><g class="jst-loader-body">
+                    <path class="jst-loader-piece blue" pathLength="100" d="M30 64 V24 L53 11 L74 23" />
+                    <path class="jst-loader-piece red" pathLength="100" d="M76 40 V80 L53 93 L32 81" />
+                    <g class="jst-loader-dots"><circle cx="86" cy="32" r="3.4" /><circle cx="93" cy="25" r="2.5" /><circle cx="99" cy="19" r="1.8" /></g>
+                </g></svg>
+            </span>
+            <span class="boot-splash-text">正在加载</span>
+        </div>
+    </div>
     <script id="meeting-bootstrap" type="application/json">{{ bootstrap|tojson }}</script>
     <noscript>请开启 JavaScript 后使用捷士通智能会议。</noscript>
     {% endif %}

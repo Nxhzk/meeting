@@ -29,7 +29,7 @@ function EntrySheet({ entry, categories, onClose, onSaved, openMeeting }) {
     const creating = entry && !entry.id;
     const [category, setCategory] = useState(entry?.category || 'person');
     const [content, setContent] = useState(entry?.content || '');
-    const [busy, setBusy] = useState(false);
+    const [busy, setBusy] = useState('');   // 正在做的操作：save | delete | restore
     const [error, setError] = useState('');
     useEffect(() => {
         setCategory(entry?.category || 'person');
@@ -37,8 +37,8 @@ function EntrySheet({ entry, categories, onClose, onSaved, openMeeting }) {
         setError('');
     }, [entry]);
 
-    async function call(path, method, json, message) {
-        setBusy(true);
+    async function call(path, method, json, message, action = 'save') {
+        setBusy(action);
         setError('');
         try {
             const saved = await request(path, { method, json });
@@ -47,19 +47,23 @@ function EntrySheet({ entry, categories, onClose, onSaved, openMeeting }) {
             onClose();
         } catch (err) {
             setError(err.data?.error || '没有保存成功，请稍后再试。');
-        } finally { setBusy(false); }
+        } finally { setBusy(''); }
     }
     const save = () => creating
         ? call('/api/memory', 'POST', { category, content }, '已记住')
         : call(`/api/memory/${entry.id}`, 'PATCH', { category, content }, '已保存');
     const deleted = entry?.deleted;
-    return <Sheet open={Boolean(entry)} onClose={onClose} busy={busy} title={creating ? '新增记忆' : deleted ? '已删除的记忆' : '编辑记忆'}
-        actions={deleted ? <button className="btn btn-primary btn-block" type="button" disabled={busy}
-            onClick={() => call(`/api/memory/${entry.id}/restore`, 'POST', {}, '已恢复')}><Icon name="restore" />恢复这条记忆</button>
-            : [<button key="s" className="btn btn-primary" type="button" disabled={busy || !content.trim()} onClick={save}>{busy ? '正在保存…' : '保存'}</button>,
-                creating ? <button key="c" className="btn btn-gray" type="button" disabled={busy} onClick={onClose}>取消</button>
-                    : <button key="d" className="btn btn-gray" type="button" style={{ color: 'var(--red)' }} disabled={busy}
-                        onClick={() => call(`/api/memory/${entry.id}`, 'DELETE', undefined, '已删除，可在「显示已删除」里恢复')}>删除</button>]}>
+    const spin = action => busy === action ? <JstLoader size={18} tone="current" /> : null;
+    return <Sheet open={Boolean(entry)} onClose={onClose} busy={Boolean(busy)} title={creating ? '新增记忆' : deleted ? '已删除的记忆' : '编辑记忆'}
+        actions={deleted ? <button className="btn btn-primary btn-block" type="button" disabled={Boolean(busy)}
+            onClick={() => call(`/api/memory/${entry.id}/restore`, 'POST', {}, '已恢复', 'restore')}>
+            {spin('restore') || <Icon name="restore" />}{busy === 'restore' ? '正在恢复…' : '恢复这条记忆'}</button>
+            : [<button key="s" className="btn btn-primary" type="button" disabled={Boolean(busy) || !content.trim()} onClick={save}>
+                {spin('save')}{busy === 'save' ? '正在保存…' : '保存'}</button>,
+                creating ? <button key="c" className="btn btn-gray" type="button" disabled={Boolean(busy)} onClick={onClose}>取消</button>
+                    : <button key="d" className="btn btn-gray" type="button" style={{ color: 'var(--red)' }} disabled={Boolean(busy)}
+                        onClick={() => call(`/api/memory/${entry.id}`, 'DELETE', undefined, '已删除，可在「显示已删除」里恢复', 'delete')}>
+                        {spin('delete')}{busy === 'delete' ? '正在删除…' : '删除'}</button>]}>
         {!deleted && <div style={{ display: 'grid', gap: 14 }}>
             <div className="field">
                 <span className="field-label">分类</span>

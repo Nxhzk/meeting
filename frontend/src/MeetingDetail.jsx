@@ -122,7 +122,7 @@ function SummarySection({ meeting, onRegenerate, onVersion, versionView, loading
             <h2 id="summary-heading">会议摘要</h2>
             <div className="summary-tools">
                 {versions.length > 1 && <button ref={versionButton} type="button" className="version-button" aria-haspopup="menu"
-                    aria-expanded={menu} onClick={() => setMenu(true)}>v{shown?.version}<Icon name="down" /></button>}
+                    aria-expanded={menu} onClick={() => setMenu(true)}>{loadingVersion && <JstLoader size={14} tone="current" />}v{shown?.version}<Icon name="down" /></button>}
                 <NavButton icon="copy" label="复制摘要" onClick={copy} />
                 {meeting.can_regenerate && <NavButton icon="sparkles" label="重新生成" onClick={onRegenerate} />}
             </div>
@@ -376,7 +376,8 @@ export function MeetingDetail({ id, title, back, backLabel = '会议', loginUrl,
                         catch { toast('这次没有提交成功，请稍后再试。', 'bad'); }
                         finally { setSending(false); }
                     }}>
-                        <Icon name={meeting.retry === 'summary' ? 'sparkles' : 'refresh'} />{meeting.retry === 'transcription' ? '重新整理' : '生成会议摘要'}
+                        {sending ? <JstLoader size={18} tone="current" /> : <Icon name={meeting.retry === 'summary' ? 'sparkles' : 'refresh'} />}
+                        {sending ? '正在提交…' : meeting.retry === 'transcription' ? '重新整理' : '生成会议摘要'}
                     </button>
                 </div>}
                 {showSummary && <SummarySection meeting={meeting} versionView={versionView} loadingVersion={loadingVersion}

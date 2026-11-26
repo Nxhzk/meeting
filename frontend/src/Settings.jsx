@@ -1,16 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Icon, NavBar, Sheet } from './ui.jsx';
 import { currentCsrf } from './recording/api.js';
-import { JstAvatar } from './JstMark.jsx';
+import { JstAvatar, JstLoader } from './JstMark.jsx';
 
 const meetingApp = /JstMeetingApp\//.test(navigator.userAgent);
 
-function Row({ icon, color, children, value, href, onClick, disabled, type = 'button', tinted }) {
+function Row({ icon, color, children, value, href, onClick, disabled, type = 'button', tinted, busy }) {
     const inner = <>
         {icon && <span className="row-icon" style={{ background: color }}><Icon name={icon} /></span>}
         <span className="row-main"><span className="row-title" style={tinted ? { color: 'var(--tint)' } : undefined}>{children}</span></span>
         {value && <span className="row-value">{value}</span>}
-        {(href || onClick) && !tinted && <Icon name="chevron" className="chevron" />}
+        {busy && <JstLoader size={20} />}
+        {(href || onClick) && !tinted && !busy && <Icon name="chevron" className="chevron" />}
     </>;
     if (href && !disabled) return <a className="row inset-sep" href={href}>{inner}</a>;
     return <button className="row inset-sep" type={type} onClick={onClick} disabled={disabled}>{inner}</button>;
@@ -18,6 +19,12 @@ function Row({ icon, color, children, value, href, onClick, disabled, type = 'bu
 
 export function SettingsPage({ config, locked }) {
     const [notes, setNotes] = useState(false);
+    const [leaving, setLeaving] = useState('');   // reload | logout：页面要整个换掉，期间给个加载提示
+    useEffect(() => {
+        const reset = () => setLeaving('');
+        window.addEventListener('pageshow', reset);
+        return () => window.removeEventListener('pageshow', reset);
+    }, []);
     const profile = config.profile || {};
     const name = profile.name || profile.username || '我';
     return <div className="page">
@@ -32,17 +39,19 @@ export function SettingsPage({ config, locked }) {
             <section className="section">
                 <div className="group">
                     <Row icon="info" color="#0a84ff" onClick={() => setNotes(true)}>录音说明</Row>
-                    <Row icon="refresh" color="#34c759" onClick={() => location.reload()} disabled={locked}>刷新页面版本</Row>
+                    <Row icon="refresh" color="#34c759" onClick={() => { setLeaving('reload'); location.reload(); }} disabled={locked || Boolean(leaving)}
+                        busy={leaving === 'reload'}>{leaving === 'reload' ? '正在刷新…' : '刷新页面版本'}</Row>
                 </div>
                 <p className="section-foot">{locked ? '录音或保存期间不能刷新页面或退出登录。' : '页面更新后，刷新即可用上新版本，不用重装应用。'}</p>
             </section>
             <section className="section">
                 <form className="group" action={config.logoutUrl} method="post" onSubmit={event => {
-                    if (locked) event.preventDefault();
-                    else event.currentTarget.elements.csrf_token.value = currentCsrf();
+                    if (locked || leaving) event.preventDefault();
+                    else { event.currentTarget.elements.csrf_token.value = currentCsrf(); setLeaving('logout'); }
                 }}>
                     <input type="hidden" name="csrf_token" defaultValue={config.csrfToken} />
-                    <button id="logout-button" className="row destructive" type="submit" disabled={locked}>退出登录</button>
+                    <button id="logout-button" className="row destructive" type="submit" disabled={locked || Boolean(leaving)} aria-busy={leaving === 'logout' || undefined}>
+                        {leaving === 'logout' ? <><JstLoader size={20} tone="current" />正在退出…</> : '退出登录'}</button>
                 </form>
             </section>
         </div>

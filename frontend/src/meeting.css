@@ -786,3 +786,8 @@ html.sheet-open .page-stack, html.sheet-open .split-list, html.sheet-open .compa
     .jst-loader svg { animation: jst-breathe 1.6s ease-in-out infinite; }
 }
 @keyframes jst-breathe { 50% { opacity: .45; } }
+
+/* 页面脚本还没下载完时的加载画面（写在 templates/meeting-app.html 里） */
+.boot-splash { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+.boot-splash-text { color: var(--label-2); font-size: 15px; letter-spacing: .02em; animation: boot-fade 1s ease .6s both; }
+@keyframes boot-fade { from { opacity: 0; } to { opacity: 1; } }

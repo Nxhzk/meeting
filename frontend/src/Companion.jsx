@@ -3,6 +3,7 @@ import { AnimatePresence, animate, motion, useMotionValue, useTransform } from '
 import { Icon, Menu, MenuItem, NavButton, Sheet, dayLabel, softSpring, spring, timeFormat, useToast } from './ui.jsx';
 import { chunkHtml, completedChunks, splitReply, typingDelay } from './chat-format.js';
 import { LiquidMark } from './LiquidOrb.jsx';
+import { JstLoader } from './JstMark.jsx';
 import { apiUrl, request } from './recording/api.js';
 
 /* 小助理：和用户的一条连续对话。
@@ -359,6 +360,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
     const [stopAsked, setStopAsked] = useState(null);   // 已经按过停止的那次回复：不重复发停止
     const [menu, setMenu] = useState(false);
     const [confirmClear, setConfirmClear] = useState(false);
+    const [clearing, setClearing] = useState(false);
     const [creditsOpen, setCreditsOpen] = useState(false);
     const { messages, running, live, credits, unread, loaded, outbox } = companion;
 
@@ -564,12 +566,15 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
     }
 
     async function clear() {
+        if (clearing) return;
+        setClearing(true);
         try {
             await request('/api/assistant/clear', { method: 'POST', json: {} });
             setConfirmClear(false);
             setRevealed({});
             toast('对话已清空，长期记忆还在');
         } catch (error) { toast(error.data?.error || '没能清空', 'bad'); }
+        finally { setClearing(false); }
     }
 
     // ---- 组装时间线
@@ -670,9 +675,10 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab }) {
         </form>
 
         <CreditsSheet credits={credits} open={creditsOpen} onClose={() => setCreditsOpen(false)} />
-        <Sheet open={confirmClear} onClose={() => setConfirmClear(false)} title="清空对话？"
-            actions={[<button key="c" className="btn btn-gray" type="button" onClick={() => setConfirmClear(false)}>取消</button>,
-                <button key="d" className="btn btn-danger" type="button" onClick={clear}>清空</button>]}>
+        <Sheet open={confirmClear} onClose={() => setConfirmClear(false)} busy={clearing} title="清空对话？"
+            actions={[<button key="c" className="btn btn-gray" type="button" disabled={clearing} onClick={() => setConfirmClear(false)}>取消</button>,
+                <button key="d" className="btn btn-danger" type="button" disabled={clearing} onClick={clear}>
+                    {clearing ? <><JstLoader size={18} tone="current" />正在清空…</> : '清空'}</button>]}>
             <p>聊天记录会被清空。长期记忆和提醒不受影响，小助理仍然记得你的习惯。</p>
         </Sheet>
     </div>;

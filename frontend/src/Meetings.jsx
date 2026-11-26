@@ -662,14 +662,14 @@ function Workspace({ config }) {
         <Sheet open={Boolean(liveId)} onClose={() => setLiveId(null)} busy={ending} title="进行中的会议"
             actions={[<button key="b" className="btn btn-gray" type="button" disabled={ending} onClick={() => setLiveId(null)}>返回</button>,
                 <button key="e" className="btn btn-danger" type="button" disabled={!active || isEnding || ending} onClick={endLive}>
-                    {!active ? '已结束' : isEnding || ending ? '正在结束…' : '结束会议'}</button>]}>
+                    {!active ? '已结束' : isEnding || ending ? <><JstLoader size={18} tone="current" />正在结束…</> : '结束会议'}</button>]}>
             <p>{dateText(active?.started_at, true)}</p>
             <p role="status" style={{ color: 'var(--label)', fontWeight: 600 }}>{liveState}</p>
             {liveError && <Banner tone="bad">{liveError}</Banner>}
         </Sheet>
         <Sheet open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} busy={deleting} title="删除这场会议？"
             actions={[<button key="c" className="btn btn-gray" type="button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>,
-                <button key="d" className="btn btn-danger" type="button" disabled={deleting || mode !== 'idle'} onClick={confirmDelete}>{deleting ? '正在删除…' : '删除'}</button>]}>
+                <button key="d" className="btn btn-danger" type="button" disabled={deleting || mode !== 'idle'} onClick={confirmDelete}>{deleting ? <><JstLoader size={18} tone="current" />正在删除…</> : '删除'}</button>]}>
             <p style={{ color: 'var(--label)', fontWeight: 600 }}>{deleteTarget && [deleteTarget.title, dateText(deleteTarget.date)].filter(Boolean).join(' · ')}</p>
             <p>录音、原文和所有摘要版本将一并删除，无法恢复。长期记忆会保留。</p>
             {deleteError && <Banner tone="bad">{deleteError}</Banner>}

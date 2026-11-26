@@ -1,5 +1,28 @@
+import { createContext, useContext, useEffect, useState } from 'react';
 import { MotionConfig, motion } from 'motion/react';
 import { Icon, Messages, softSpring } from './ui.jsx';
+import { JstLoader } from './JstMark.jsx';
+
+// 表单提交后到新页面出来之前：按钮上转加载动画、不能重复点（不然像是卡住了）
+const Submitting = createContext(false);
+
+function SubmitButton({ className, busyText = '请稍候…', children }) {
+    const busy = useContext(Submitting);
+    return <button className={className} type="submit" disabled={busy} aria-busy={busy || undefined}>
+        {busy ? <><JstLoader size={18} tone="current" />{busyText}</> : children}
+    </button>;
+}
+
+function usePendingSubmit() {
+    const [busy, setBusy] = useState(false);
+    // 从下一页按返回回到这里（页面被浏览器缓存）：恢复可点
+    useEffect(() => {
+        const reset = () => setBusy(false);
+        window.addEventListener('pageshow', reset);
+        return () => window.removeEventListener('pageshow', reset);
+    }, []);
+    return [busy, () => setBusy(true)];
+}
 
 function Field({ name, label, errors, ...input }) {
     const messages = errors?.[name] || [];
@@ -15,9 +38,19 @@ function Field({ name, label, errors, ...input }) {
 
 function Form({ action, config, children, className = 'auth-form', ...props }) {
     // 普通表单提交：保留 Flask-Login、频率限制和跳转。
-    return <form className={className} method="post" action={action} {...props}>
+    const [busy, submitted] = usePendingSubmit();
+    return <form className={className} method="post" action={action} {...props}
+        onSubmit={event => { if (busy) event.preventDefault(); else submitted(); }}>
         <input type="hidden" name="csrf_token" value={config.csrfToken} />
-        {children}
+        <Submitting.Provider value={busy}>{children}</Submitting.Provider>
+    </form>;
+}
+
+function SsoForm({ config, children }) {
+    const [busy, submitted] = usePendingSubmit();
+    return <form className="auth-form" action={config.ssoUrl} method="get" style={{ marginBottom: 16 }}
+        onSubmit={event => { if (busy) event.preventDefault(); else submitted(); }}>
+        <Submitting.Provider value={busy}>{children}</Submitting.Provider>
     </form>;
 }
 
@@ -30,16 +63,16 @@ function Login({ config }) {
             <label className="check-label"><input type="checkbox" name="remember" defaultChecked={config.remember} /> 保持登录</label>
             {!config.passwordLoginDisabled && <a href={config.forgotUrl}>忘记密码</a>}
         </div>
-        <button className="btn btn-primary btn-block" type="submit">登录</button>
+        <SubmitButton className="btn btn-primary btn-block" busyText="正在登录…">登录</SubmitButton>
     </Form>;
     return <>
-        {config.ssoUrl && <form className="auth-form" action={config.ssoUrl} method="get" style={{ marginBottom: 16 }}>
+        {config.ssoUrl && <SsoForm config={config}>
             {config.next && <input type="hidden" name="next" value={config.next} />}
-            <button className={`btn ${config.passwordLoginDisabled ? 'btn-primary' : 'btn-gray'} btn-block`} type="submit">
+            <SubmitButton className={`btn ${config.passwordLoginDisabled ? 'btn-primary' : 'btn-gray'} btn-block`} busyText="正在跳转…">
                 使用 {config.ssoProvider} 登录
-            </button>
+            </SubmitButton>
             <label className="check-label"><input type="checkbox" name="remember" value="1" /> 保持登录</label>
-        </form>}
+        </SsoForm>}
         {config.passwordLoginDisabled ? <details open={config.showPasswordForm}>
             <summary style={{ color: 'var(--tint)', minHeight: 44 }}>使用账号和密码登录</summary>{form}
         </details> : <>{form}{config.registerUrl && <div className="auth-links"><a href={config.registerUrl}>注册账号</a></div>}</>}
@@ -55,7 +88,7 @@ function PublicForm({ config }) {
         <p style={{ color: 'var(--label-2)' }}>{page === 'verified' ? '邮箱验证完成，可以登录了。' : config.emailMessage}</p>
         {config.resendUrl && <Form action={config.resendUrl} config={config}>
             <input type="hidden" name="email" value={email || ''} />
-            <button className="btn btn-gray btn-block" type="submit">重新发送验证邮件</button>
+            <SubmitButton className="btn btn-gray btn-block" busyText="正在发送…">重新发送验证邮件</SubmitButton>
         </Form>}
     </>;
     return <Form action={formUrl} config={config}>
@@ -66,7 +99,8 @@ function PublicForm({ config }) {
             <Field name="password" label="新密码" type="password" autoComplete="new-password" errors={errors} required />
             <Field name="confirm_password" label="确认密码" type="password" autoComplete="new-password" errors={errors} required />
         </>}
-        <button type="submit" className="btn btn-primary btn-block">{page === 'forgot' ? '发送重置邮件' : authLabels[page]}</button>
+        <SubmitButton className="btn btn-primary btn-block" busyText={page === 'forgot' ? '正在发送…' : '正在提交…'}>
+            {page === 'forgot' ? '发送重置邮件' : authLabels[page]}</SubmitButton>
     </Form>;
 }
 
@@ -81,7 +115,7 @@ function Account({ config }) {
                 <Field name="user_job_title" label="职位" defaultValue={profile.jobTitle} autoComplete="organization-title" />
                 <Field name="user_company" label="公司" defaultValue={profile.company} autoComplete="organization" />
                 <p className="section-foot" style={{ padding: 0 }}>会议助手会参考这些信息，例如知道纪要由谁记录。</p>
-                <button type="submit" className="btn btn-gray btn-block">保存资料</button>
+                <SubmitButton className="btn btn-gray btn-block" busyText="正在保存…">保存资料</SubmitButton>
             </Form>
         </div>
         {config.canChangePassword && <div className="group">
@@ -90,7 +124,7 @@ function Account({ config }) {
                 <Field name="current_password" label="当前密码" type="password" autoComplete="current-password" required />
                 <Field name="new_password" label="新密码" type="password" autoComplete="new-password" required />
                 <Field name="confirm_password" label="确认新密码" type="password" autoComplete="new-password" required />
-                <button type="submit" className="btn btn-gray btn-block">更改密码</button>
+                <SubmitButton className="btn btn-gray btn-block" busyText="正在保存…">更改密码</SubmitButton>
             </Form>
         </div>}
     </>;
