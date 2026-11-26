@@ -353,7 +353,7 @@ class LiveStateTest(unittest.TestCase):
         run.id, run.user_id, run.proactive, run.ended, run.aborted, run.thinking = 'r1', self.user_id, False, False, False, False
         from src.services.companion.runner import _segment
         run.segments, run.current, run.thinking_chars, run.error, run.user_messages = [], _segment(), 0, None, 0
-        run._thinking_since, run._thought_buffer, run._thought_pushed_at = None, '', 0.0
+        run._thinking_since, run._thought_buffer, run._thought_pushed_at, run._work_since = None, '', 0.0, None
         return run
 
     def feed(self, run, *events):
@@ -374,6 +374,7 @@ class LiveStateTest(unittest.TestCase):
                       {'type': 'message_update', 'assistantMessageEvent': {'type': 'text_delta', 'delta': '定了。'}})
         deltas = ''.join(d['text'] for e, d in pushed if e == 'thinking' and d.get('state') == 'delta')
         self.assertEqual(deltas, '想一想' * 40)                       # 一个字都不少
+        self.assertIn('done', [d.get('state') for e, d in pushed if e == 'thinking'])   # 开始写回答时思考区收起
         self.assertLess(sum(1 for e, d in pushed if d.get('state') == 'delta'), 40)   # 攒成批推，不是一字一推
         self.assertIn('想一想', run.snapshot()['segments'][-1]['thought'])
         with self.app.app_context():
@@ -382,6 +383,26 @@ class LiveStateTest(unittest.TestCase):
             self.assertGreaterEqual(saved[0].meta['thought']['seconds'], 1)
             from src.database import db
             db.session.rollback()
+
+    def test_tool_steps_flow_into_the_same_thought_stream(self):
+        # agent：思考 → 查资料 → 再思考 → 回答。查资料的步骤按顺序写进同一个思考区
+        run = self.run_obj()
+        from unittest import mock
+        from src.services.companion import hub
+        with mock.patch.object(hub, 'publish'):
+            self.feed(run,
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_start'}},
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_delta', 'delta': '先查会议'}},
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_end'}},
+                      {'type': 'tool_execution_start', 'toolCallId': 't1', 'toolName': 'meeting_api', 'args': {'method': 'GET', 'path': '/meetings'}},
+                      {'type': 'tool_execution_end', 'toolCallId': 't1', 'isError': False},
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_start'}},
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_delta', 'delta': '找到了'}},
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'thinking_end'}},
+                      {'type': 'message_update', 'assistantMessageEvent': {'type': 'text_delta', 'delta': '定了。'}})
+        thought = run.current['thought']
+        self.assertLess(thought.index('先查会议'), thought.index('▸ 查看会议列表'))
+        self.assertLess(thought.index('▸ 查看会议列表'), thought.index('找到了'))
 
     def test_snapshot_has_everything_written_so_far(self):
         run = self.run_obj()

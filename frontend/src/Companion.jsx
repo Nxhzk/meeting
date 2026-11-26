@@ -144,7 +144,7 @@ export function useCompanion(enabled = true, owner = 'me') {
             // 思考：start 开始、delta 一小批思考文字、end 结束（带这一段累计的思考时长）
             on('thinking', data => patch(data, l => {
                 if (data.state === 'delta') return editLast(l, last => ({ ...last, thought: (last.thought + data.text).slice(-8000) }));
-                if (data.state === 'end') return { ...editLast(l, last => ({ ...last, thought_ms: data.ms ?? last.thought_ms })), thinking: false };
+                if (data.state === 'end' || data.state === 'done') return { ...editLast(l, last => ({ ...last, thought_ms: data.ms ?? last.thought_ms })), thinking: false };
                 return { ...editLast(l, last => ({ ...last, thought: last.thought && !last.thought.endsWith('\n\n') ? `${last.thought}\n\n` : last.thought })), thinking: true };
             }));
             on('tool', data => patch(data, l => editLast(l, last => {
@@ -352,14 +352,21 @@ function ThoughtStream({ text, ms = 0, active = false }) {
         <AnimatePresence initial={false}>
             {active && <motion.div key="stream" className="thought-window" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
                 exit={{ height: 0, opacity: 0 }} transition={softSpring}>
-                <div ref={window_} className="thought-scroll" aria-live="off">{(text || '…').replace(/\n{2,}/g, '\n')}</div>
+                <div ref={window_} className="thought-scroll" aria-live="off"><ThoughtLines text={(text || '…').replace(/\n{2,}/g, '\n')} /></div>
             </motion.div>}
             {!active && open && <motion.div key="full" className="thought-full" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
                 exit={{ height: 0, opacity: 0 }} transition={softSpring}>
-                <div className="thought-full-text">{text}</div>
+                <div className="thought-full-text"><ThoughtLines text={text} /></div>
             </motion.div>}
         </AnimatePresence>
     </div>;
+}
+
+/** 思考内容按行显示：「▸ 查看会议摘要」这种查资料的步骤用主题色，和思考文字区分开。 */
+function ThoughtLines({ text }) {
+    return text.split('\n').map((line, i) => line.startsWith('▸ ')
+        ? <div key={i} className="thought-step">{line}</div>
+        : <div key={i}>{line || '\u00a0'}</div>);
 }
 
 function Typing({ label }) {
@@ -645,7 +652,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
         if (shown === 0) continue;
         items.push(<div className="msg-group" key={message.id}>
             <ThoughtStream text={message.meta?.thought?.text} ms={(message.meta?.thought?.seconds || 0) * 1000} />
-            <ToolLine tools={message.meta?.tools} />
+            {!message.meta?.thought && <ToolLine tools={message.meta?.tools} />}
             <Bubbles chunks={chunks.slice(0, shown)} mine={false} time={time} kind={message.kind} label={proactiveLabel(message)}
                 meta={message.meta?.stopped ? '已停止 · ' : ''} done={shown >= chunks.length}
                 animate={revealed[message.id] !== undefined} onMeeting={openMeeting} />
@@ -655,11 +662,13 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
         live.segments.forEach((segment, i) => {
             const done = completedChunks(segment.text);
             const count = Math.min(liveShown[i] || 0, done.length);
-            const thinkingNow = live.thinking && i === live.segments.length - 1;
-            if (!count && !segment.tools.length && !segment.thought && !thinkingNow) return;
+            // 一次回复只有一个思考区：从开始干活到开始写回答，一直展开（中间几轮思考、查资料都流进去），
+            // 开始写回答时才收起一次——不会随着每轮思考反复展开、收起
+            const working = i === live.segments.length - 1 && !segment.text.trim() && (live.thinking || Boolean(segment.thought));
+            if (!count && !segment.tools.length && !segment.thought && !working) return;
             items.push(<div className="msg-group" key={`live-${i}`}>
-                <ThoughtStream text={segment.thought} ms={segment.thought_ms} active={thinkingNow} />
-                <ToolLine tools={segment.tools} />
+                <ThoughtStream text={segment.thought} ms={segment.thought_ms} active={working} />
+                {!segment.thought && <ToolLine tools={segment.tools} />}
                 {count > 0 && <Bubbles chunks={done.slice(0, count)} mine={false} done={false} animate onMeeting={openMeeting} />}
             </div>);
         });
@@ -678,6 +687,8 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
         </div>);
     }
     const toolBusy = live?.segments.some(seg => seg.tools.some(t => t.status === 'running'));
+    const lastLive = live?.segments.at(-1);
+    const workingNow = Boolean(lastLive && !lastLive.text.trim() && (live.thinking || lastLive.thought));
 
     return <div className="companion">
         {/* 抽屉顶部：按住往下拖可以收起（只认这一条，聊天区上下滑照常滚动） */}
@@ -709,7 +720,7 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
                     </div>
                 </motion.div>}
                 {items}
-                <AnimatePresence>{typing && !live?.thinking && <Typing key="typing" label={live?.queue != null ? (live.queue > 0 ? `排队中，前面还有 ${live.queue} 位` : '排队中，马上开始') : toolBusy ? '查资料中' : '正在输入'} />}</AnimatePresence>
+                <AnimatePresence>{typing && !workingNow && <Typing key="typing" label={live?.queue != null ? (live.queue > 0 ? `排队中，前面还有 ${live.queue} 位` : '排队中，马上开始') : toolBusy ? '查资料中' : '正在输入'} />}</AnimatePresence>
             </div>
         </div>
 

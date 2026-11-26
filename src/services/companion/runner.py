@@ -97,6 +97,7 @@ class CompanionRun:
         self.current = _segment()
         self.thinking_chars = 0
         self._thinking_since = None
+        self._work_since = None     # 这一段从开始干活（思考、查资料）算起，到开始写回答为止
         self._thought_buffer = ''   # 还没推给页面的思考文字（攒一小批再推，不一个字一推）
         self._thought_pushed_at = 0.0
         self.error = None
@@ -266,6 +267,7 @@ class CompanionRun:
         if self.current['text'].strip() or self.current['tools']:
             self.segments.append(self.current)
         self.current = _segment()
+        self._work_since = None
 
     def _read(self):
         try:
@@ -288,11 +290,14 @@ class CompanionRun:
         if kind == 'message_update':
             delta = event.get('assistantMessageEvent') or {}
             if delta.get('type') == 'text_delta':
+                if not self.current['text'].strip() and self._work_since is not None and (delta.get('delta') or '').strip():
+                    self._close_work()
                 self.current['text'] += delta.get('delta') or ''
                 self._publish('delta', {'text': delta.get('delta') or ''})
             elif delta.get('type') == 'thinking_start':
                 self.thinking = True
                 self._thinking_since = time.monotonic()
+                self._start_work()
                 if self.current['thought'] and not self.current['thought'].endswith('\n\n'):
                     self.current['thought'] += '\n\n'     # 同一段里第二次思考（查完资料再想）：空一行
                 self._publish('thinking', {'state': 'start'})
@@ -307,9 +312,9 @@ class CompanionRun:
             elif delta.get('type') == 'thinking_end':
                 self._push_thought(time.monotonic())
                 self.thinking = False
-                if self._thinking_since is not None:
-                    self.current['thought_ms'] += int((time.monotonic() - self._thinking_since) * 1000)
-                    self._thinking_since = None
+                self._thinking_since = None
+                if self._work_since is not None:
+                    self.current['thought_ms'] = int((time.monotonic() - self._work_since) * 1000)
                 self._publish('thinking', {'state': 'end', 'chars': self.thinking_chars, 'ms': self.current['thought_ms']})
         elif kind == 'message_start':
             message = event.get('message') or {}
@@ -330,12 +335,28 @@ class CompanionRun:
         elif kind == 'tool_execution_start':
             tool = {'id': event.get('toolCallId'), 'tool': event.get('toolName'), 'label': _label(event), 'status': 'running'}
             self.current['tools'].append(tool)
+            if not self.current['text'].strip():
+                # 查资料的步骤也按先后顺序写进思考流（和思考文字在同一个区域里，不另外冒出来）
+                self._start_work()
+                step = f"\n▸ {tool['label']}\n"
+                self.current['thought'] = (self.current['thought'].rstrip('\n') + step)[-THOUGHT_KEEP:]
+                self._thought_buffer += step
+                self._push_thought(time.monotonic())
             self._publish('tool', tool)
         elif kind == 'tool_execution_end':
             for tool in self.current['tools']:
                 if tool['id'] == event.get('toolCallId'):
                     tool['status'] = 'error' if event.get('isError') else 'ok'
                     self._publish('tool', tool)
+
+    def _start_work(self):
+        if self._work_since is None:
+            self._work_since = time.monotonic()
+
+    def _close_work(self):
+        self.current['thought_ms'] = int((time.monotonic() - self._work_since) * 1000)
+        self._work_since = None
+        self._publish('thinking', {'state': 'done', 'ms': self.current['thought_ms']})
 
     def _push_thought(self, now):
         if self._thought_buffer:
