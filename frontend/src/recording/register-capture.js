@@ -3,7 +3,8 @@ import { clearChunks, dropChunk, readChunks, stageChunk } from './spool.js';
 
 const BASE = '/upload/session';
 const CHUNK_MS = 5000;
-const MAX_MEETING_MS = 60 * 60 * 1000;
+// 防止忘了关的录音一直录：和服务器的 MEETING_MAX_HOURS 一致
+const MAX_MEETING_MS = 12 * 60 * 60 * 1000;
 const LATE_DATA_MS = 2000;
 const SESSION_ID = /^[a-z0-9-]{16,64}$/i;
 const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'];
@@ -617,7 +618,7 @@ export class MeetingCapture {
                         this.sequence = error.data.chunk_count || 0;
                         this.session.finalizing = ['finalizing', 'finalized', 'failed'].includes(error.data.status);
                         if (['aborted', 'expired'].includes(error.data.status) || (!this.sequence && !this.session.finalizing)) {
-                            this.finish(null, automatic ? '会议已到一小时，但没有收到可保存的录音。' : '这场会议已结束，没有可继续保存的录音。');
+                            this.finish(null, automatic ? '会议已到最长 12 小时，但没有收到可保存的录音。' : '这场会议已结束，没有可继续保存的录音。');
                             return;
                         }
                         break;
@@ -634,7 +635,7 @@ export class MeetingCapture {
                 if (!this.sequence && !this.session.finalizing) {
                     await request(`/api/meetings/live/${encodeURIComponent(id)}/end`, { method: 'POST', json: {} });
                     this.finish(null, this.session.automatic
-                        ? '会议已到一小时，但没有收到可保存的录音。' : '没有收到会议声音，请重新开始会议。');
+                        ? '会议已到最长 12 小时，但没有收到可保存的录音。' : '没有收到会议声音，请重新开始会议。');
                     return;
                 }
                 try {
@@ -709,7 +710,7 @@ export class MeetingCapture {
             if (!['recording', 'finalizing'].includes(remote.status)) {
                 this.session = draft;
                 return this.finish(null, timedOut
-                    ? '会议已到一小时，但没有收到可保存的录音。' : '没有可继续保存的会议，可以开始新的会议。');
+                    ? '会议已到最长 12 小时，但没有收到可保存的录音。' : '没有可继续保存的会议，可以开始新的会议。');
             }
             this.queue = [];
             this.sequence = remote.chunk_count || 0;
@@ -790,7 +791,7 @@ export class MeetingCapture {
         this.unlock();
         this.show('idle');
         const result = draft?.automatic && id
-            ? (draft.interrupted ? '已到一小时，已保存收到的录音。中断期间可能有漏录。' : '已到一小时，会议已自动结束并保存。')
+            ? (draft.interrupted ? '已录满 12 小时，已保存收到的录音。中断期间可能有漏录。' : '已录满 12 小时，会议已自动结束并保存。')
             : draft?.interrupted ? '已保存能找回的内容，摘要可能不完整。' : '';
         this.notice(message || result, draft?.interrupted || message ? 'warn' : 'good');
         if (id) this.complete(id, Boolean(draft?.interrupted), Boolean(draft?.automatic));

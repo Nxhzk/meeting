@@ -120,5 +120,46 @@ class NativeRecordingStitchTest(unittest.TestCase):
         path = self.stitch(client, self.record(client, parts))
         self.assertAlmostEqual(float(self.probe(path)['format']['duration']), 18.0, delta=0.6)
 
+    def test_several_chunks_sent_as_one_upload_join_seamlessly(self):
+        # 网络差积压时原生录音器把几段合成一次上传：服务器照样拼成完整的录音
+        parts = self.chunks(6)
+        merged = [parts[0], b''.join(parts[1:5]), parts[5]]
+        client = self.client()
+        path = self.stitch(client, self.record(client, merged))
+        self.assertAlmostEqual(float(self.probe(path)['format']['duration']), 12.0, delta=0.5)
+
+    def test_meeting_past_the_limit_keeps_taking_the_backlog(self):
+        # 到了最长时长，手机还在补传积压的录音：继续收；停传 30 分钟以上才自动保存
+        from datetime import datetime, timedelta
+        from src.api.recording_sessions import cleanup_due_meetings
+        from src.database import db
+        from src.models.recording_session import RecordingSession, MEETING_MAX_SECONDS
+        self.assertGreaterEqual(MEETING_MAX_SECONDS, 12 * 3600)
+        client = self.client()
+        parts = self.chunks(3)
+        session_id = self.record(client, parts[:1])
+        with self.app.app_context():
+            s = db.session.get(RecordingSession, session_id)
+            s.created_at = datetime.utcnow() - timedelta(seconds=MEETING_MAX_SECONDS + 600)
+            s.last_seen_at = datetime.utcnow() - timedelta(minutes=5)
+            db.session.commit()
+        cleanup_due_meetings(self.app)
+        late = client.post(f'/upload/session/{session_id}/chunks/2', data=parts[1], content_type='application/octet-stream')
+        self.assertEqual(late.status_code, 204, late.get_data(as_text=True))
+        with self.app.app_context():
+            s = db.session.get(RecordingSession, session_id)
+            self.assertEqual(s.status, 'recording')
+            s.last_seen_at = datetime.utcnow() - timedelta(minutes=31)
+            db.session.commit()
+        closed = client.post(f'/upload/session/{session_id}/chunks/3', data=parts[2], content_type='application/octet-stream')
+        self.assertEqual(closed.status_code, 409)
+        self.assertTrue(closed.get_json()['meeting_closed'])
+        cleanup_due_meetings(self.app)
+        with self.app.app_context():
+            s = db.session.get(RecordingSession, session_id)
+            self.assertIn(s.status, ('finalizing', 'finalized'))
+            self.assertEqual(s.chunk_count, 2)
+
+
 if __name__ == '__main__':
     unittest.main()

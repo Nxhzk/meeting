@@ -45,6 +45,8 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
         private const val LEVEL_MS = 250L
         private const val SAMPLE_RATE = 32_000
         private const val BIT_RATE = 48_000
+        private const val MAX_BATCH = 24              // 积压时一次最多传 24 段（2 分钟录音，约 700KB）
+        private const val CONTINUE_MIN_CHUNKS = 6     // 服务器那边已关、手机上还剩这么多（30 秒）以上：另存一条
     }
 
     // ---------------------------------------------------------------- 持久化的状态
@@ -63,6 +65,11 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
         var recordingId: Long? = null,
         var finished: Boolean = false,
         var failure: String? = null,
+        // 手机上的分段编号（chunk-N）和服务器上的编号分开记：积压时几段合成一次上传
+        var remote: String = session,  // 服务器上的会议编号（续存时换成新的）
+        var serverNext: Int = 0,       // 服务器期待的下一段编号；0 = 不知道，先问服务器
+        var serverBytes: Long = -1,    // 服务器已收到的字节数；-1 = 不知道
+        var firstRecordingId: Long? = null, // 续存时：前半段已经保存成的会议
     ) {
         fun toJson() = JSONObject().apply {
             put("session", session); put("base", base); put("cookie", cookie); put("csrf", csrf)
@@ -70,6 +77,8 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
             put("ended", ended); put("automatic", automatic); put("interrupted", interrupted); put("gapMs", gapMs)
             recordingId?.let { put("recordingId", it) }
             put("finished", finished); failure?.let { put("failure", it) }
+            put("remote", remote); put("serverNext", serverNext); put("serverBytes", serverBytes)
+            firstRecordingId?.let { put("firstRecordingId", it) }
         }
 
         companion object {
@@ -79,6 +88,9 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
                 json.optBoolean("ended"), json.optBoolean("automatic"), json.optBoolean("interrupted"),
                 json.optLong("gapMs"), if (json.has("recordingId")) json.getLong("recordingId") else null,
                 json.optBoolean("finished"), json.optString("failure").ifEmpty { null },
+                json.optString("remote").ifEmpty { json.getString("session") },
+                json.optInt("serverNext", 0), json.optLong("serverBytes", -1),
+                if (json.has("firstRecordingId")) json.getLong("firstRecordingId") else null,
             )
         }
     }
@@ -177,7 +189,9 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
                 dir(current.session).deleteRecursively()
             }
             dir(session).mkdirs()
-            state = RecState(session, base, cookie, csrf, startedAt, endsAt, max(1, nextIndex))
+            state = RecState(session, base, cookie, csrf, startedAt, endsAt, max(1, nextIndex)).apply {
+                if (nextIndex <= 1) { serverNext = 1; serverBytes = 0 }
+            }
             uploaded = max(1, nextIndex) - 1
             uploadProblem = null
             notice = null
@@ -519,11 +533,12 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
         override fun run() {
             while (true) {
                 val s = state
-                val next = s?.let { pendingChunks(it.session).firstOrNull() }
+                val next = s?.let { pendingChunks(it.session) }.orEmpty()
                 try {
                     when {
                         s == null || s.finished -> sleep(60_000)
-                        next != null -> upload(s, next.first, next.second)
+                        s.serverNext <= 0 || s.serverBytes < 0 -> reconcile(s)
+                        next.isNotEmpty() -> upload(s, next)
                         s.ended && media == null -> finalize(s)
                         else -> sleep(30_000)
                     }
@@ -536,6 +551,9 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
                     sleep(60_000)
                 } catch (e: Exception) {
                     failures += 1
+                    // 没收到回复：服务器可能已经收下了这一批。下次先问清楚，再决定传什么
+                    if (s != null && !(e is HttpError && e.code in setOf(401, 403))) s.serverBytes = -1
+                    batch = max(1, batch / 2)
                     val login = e is HttpError && (e.code == 401 || e.code == 403)
                     val problem = if (login) "登录已失效。录音都保存在手机上，重新登录后会自动上传。"
                     else "网络不稳，录音保存在手机上，联网后会自动上传。"
@@ -549,66 +567,134 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
             }
         }
 
-        private fun upload(s: RecState, index: Int, file: File) {
-            val (code, body) = request(s, "POST", "upload/session/${s.session}/chunks/$index", file.readBytes(), "application/octet-stream")
+        /** 一次传几段：网络好时逐渐加大（积压能很快追上），失败就减半。 */
+        private var batch = 4
+
+        private fun upload(s: RecState, pending: List<Pair<Int, File>>) {
+            // 只取编号连续的一串（正常总是连续的）
+            val picked = ArrayList<Pair<Int, File>>()
+            for (item in pending) {
+                if (picked.size >= batch || (picked.isNotEmpty() && item.first != picked.last().first + 1)) break
+                picked += item
+            }
+            val bytes = java.io.ByteArrayOutputStream().apply { picked.forEach { write(it.second.readBytes()) } }.toByteArray()
+            val index = s.serverNext
+            val (code, body) = request(s, "POST", "upload/session/${s.remote}/chunks/$index", bytes, "application/octet-stream")
             when {
-                code in 200..299 -> done(s, index, file)
-                code == 409 && body.optBoolean("meeting_closed") -> {
-                    // 会议已在别处结束或到了一小时：停止录音，未上传的丢弃，服务器那边已有的照样保存
-                    Log.w(TAG, "Server closed meeting ${s.session.take(8)}: ${body.optString("status")}")
-                    for ((_, f) in pendingChunks(s.session)) f.delete()
-                    handler.post {
-                        s.automatic = s.automatic || body.optBoolean("meeting_limit_reached")
-                        if (index > body.optInt("chunk_count")) s.interrupted = true
-                        endInternal(automatic = body.optBoolean("meeting_limit_reached"))
-                    }
+                code in 200..299 -> {
+                    acked(s, picked, index + 1, s.serverBytes + bytes.size)
+                    batch = min(MAX_BATCH, batch * 2)
                 }
-                code == 409 && body.has("expected_chunk_index") -> {
-                    val expected = body.getInt("expected_chunk_index")
-                    if (expected > index) done(s, index, file) // 服务器已经有这一段（上次的确认丢了）
-                    else renumber(s, expected)                // 中间缺了几段：后面的往前挪，保持连续
-                }
+                code == 409 && body.optBoolean("meeting_closed") -> closed(s, body)
+                code == 409 && body.has("expected_chunk_index") -> reconcile(s)
                 else -> throw HttpError(code, body.optString("error"))
             }
         }
 
-        private fun done(s: RecState, index: Int, file: File) {
-            file.delete()
-            uploaded = max(uploaded, index)
+        private fun acked(s: RecState, files: List<Pair<Int, File>>, serverNext: Int, serverBytes: Long) {
+            files.forEach { it.second.delete() }
+            files.lastOrNull()?.let { uploaded = max(uploaded, it.first) }
+            s.serverNext = serverNext
+            s.serverBytes = serverBytes
+            saveState()
             handler.post { if (state === s && (s.ended || phase != "recording")) publish() }
         }
 
-        private fun renumber(s: RecState, expected: Int) {
-            val chunks = pendingChunks(s.session)
-            var target = expected
-            for ((_, f) in chunks) {
-                f.renameTo(File(dir(s.session), "chunk-$target.aac"))
-                target += 1
-            }
-            handler.post {
-                s.nextIndex = target
-                s.interrupted = true
+        /**
+         * 和服务器对一下账：它收到了几段、多少字节。上一批「发出去但没收到回复」时，
+         * 按字节数认出它收下的是哪几段，删掉，接着传后面的——不重复、不漏。
+         */
+        private fun reconcile(s: RecState) {
+            val (code, status) = request(s, "GET", "upload/session/${s.remote}", null, null)
+            if (code == 404) return finished(s, s.firstRecordingId, "这场会议已不在服务器上。")
+            if (code !in 200..299) throw HttpError(code, status.optString("error"))
+            if (status.optString("status") != "recording") return closed(s, status)
+            val count = status.optInt("chunk_count")
+            val bytes = status.optLong("bytes_received")
+            val pending = pendingChunks(s.session)
+            if (s.serverNext > 0 && count >= s.serverNext) {
+                // 服务器比我们以为的多收了：找出总字节数正好对得上的前几段
+                var sum = 0L
+                var taken = 0
+                if (s.serverBytes >= 0) {
+                    val extra = bytes - s.serverBytes
+                    while (taken < pending.size && sum < extra) { sum += pending[taken].second.length(); taken++ }
+                    if (sum != extra) taken = -1
+                } else taken = -1
+                if (taken < 0) {
+                    // 对不上（老版本留下的状态等）：按一段对一段处理
+                    taken = min(pending.size, count - s.serverNext + 1)
+                    Log.w(TAG, "Reconcile by count: server has $count, expected ${s.serverNext - 1}")
+                }
+                acked(s, pending.take(taken), count + 1, bytes)
+            } else {
+                if (s.serverNext > 0 && count < s.serverNext - 1) {
+                    Log.w(TAG, "Server has fewer chunks ($count) than acknowledged (${s.serverNext - 1})")
+                    handler.post { s.interrupted = true }
+                }
+                s.serverNext = count + 1
+                s.serverBytes = bytes
                 saveState()
             }
-            Log.w(TAG, "Renumbered ${chunks.size} chunks from $expected")
+        }
+
+        /** 服务器不再收这场会议（被别处结束、到了最长时长、或已删除）。 */
+        private fun closed(s: RecState, body: JSONObject) {
+            val status = body.optString("status")
+            val leftover = pendingChunks(s.session)
+            Log.w(TAG, "Server closed meeting ${s.remote.take(8)}: $status, ${leftover.size} chunks left on the phone")
+            handler.post {
+                s.automatic = s.automatic || body.optBoolean("meeting_limit_reached")
+                if (!s.ended) endInternal(automatic = body.optBoolean("meeting_limit_reached"))
+            }
+            if (status in setOf("finalizing", "finalized") && leftover.size >= CONTINUE_MIN_CHUNKS) {
+                // 手机上还有没传上去的录音：不丢，另开一场接着存（会议列表里会多一条「续」）
+                val (_, old) = request(s, "GET", "upload/session/${s.remote}", null, null)
+                val (code, created) = request(s, "POST", "upload/session",
+                    """{"mime_type":"$MIME","meeting_mode":true}""".toByteArray(), "application/json")
+                val id = created.optString("session_id")
+                if (code !in 200..299 || id.isEmpty()) throw HttpError(code, created.optString("error"))
+                if (s.firstRecordingId == null && old.optLong("finalized_recording_id", -1) > 0)
+                    s.firstRecordingId = old.getLong("finalized_recording_id")
+                s.remote = id
+                s.serverNext = 1
+                s.serverBytes = 0
+                handler.post { s.interrupted = true }
+                saveState()
+                Log.w(TAG, "Continuing ${leftover.size} chunks in ${id.take(8)}")
+                return
+            }
+            // 会议被删除/放弃，或只剩零头：服务器上已有的照样保存，手机上的丢弃
+            if (leftover.isNotEmpty()) handler.post { s.interrupted = true }
+            for ((_, f) in leftover) f.delete()
+            if (status in setOf("finalizing", "finalized")) {
+                val (_, old) = request(s, "GET", "upload/session/${s.remote}", null, null)
+                val id = old.optLong("finalized_recording_id", -1)
+                return finished(s, s.firstRecordingId ?: id.takeIf { it > 0 }, null)
+            }
+            if (s.firstRecordingId != null) return finished(s, s.firstRecordingId, null)
+            return finished(s, null, "这场会议已经结束，没有可保存的录音。")
         }
 
         private fun finalize(s: RecState) {
-            if (s.nextIndex <= 1 && pendingChunks(s.session).isEmpty()) {
+            if (s.serverNext <= 1 && pendingChunks(s.session).isEmpty()) {
+                if (s.firstRecordingId != null) return finished(s, s.firstRecordingId, null)
                 // 一段都没有：结束服务器上的会议，没有可保存的录音
-                request(s, "POST", "api/meetings/live/${s.session}/end", "{}".toByteArray(), "application/json")
+                request(s, "POST", "api/meetings/live/${s.remote}/end", "{}".toByteArray(), "application/json")
                 return finished(s, null, "没有收到会议声音，请重新开始会议。")
             }
-            val (code, body) = request(s, "POST", "upload/session/${s.session}/finalize",
+            val (code, body) = request(s, "POST", "upload/session/${s.remote}/finalize",
                 """{"meeting_mode":true}""".toByteArray(), "application/json")
-            if (code in 200..299 && body.has("recording_id")) return finished(s, body.getLong("recording_id"), null)
+            // 续存的会议：界面打开前半段那条（两条都在会议列表里）
+            if (code in 200..299 && body.has("recording_id")) return finished(s, s.firstRecordingId ?: body.getLong("recording_id"), null)
             if (code == 409) {
-                val (_, status) = request(s, "GET", "upload/session/${s.session}", null, null)
+                val (_, status) = request(s, "GET", "upload/session/${s.remote}", null, null)
                 val id = status.optLong("finalized_recording_id", -1)
-                if (id > 0 && status.optString("status") in setOf("finalized", "failed")) return finished(s, id, null)
-                if (status.optString("status") in setOf("aborted", "expired")) return finished(s, null, "这场会议已经结束，没有可保存的录音。")
+                if (id > 0 && status.optString("status") in setOf("finalized", "failed")) return finished(s, s.firstRecordingId ?: id, null)
+                if (status.optString("status") in setOf("aborted", "expired"))
+                    return finished(s, s.firstRecordingId, if (s.firstRecordingId == null) "这场会议已经结束，没有可保存的录音。" else null)
             }
-            if (code == 404) return finished(s, null, "这场会议已不在服务器上。")
+            if (code == 404) return finished(s, s.firstRecordingId, if (s.firstRecordingId == null) "这场会议已不在服务器上。" else null)
             throw HttpError(code, body.optString("error"))
         }
 
@@ -671,7 +757,7 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
         try {
             connection.requestMethod = method
             connection.connectTimeout = 10_000
-            connection.readTimeout = 20_000
+            connection.readTimeout = 30_000
             connection.instanceFollowRedirects = false
             connection.useCaches = false
             connection.setRequestProperty("Accept", "application/json")
@@ -689,9 +775,11 @@ class NativeRecorder(private val context: Context, private val onStatus: (JSONOb
             if (code in 300..399) return 401 to JSONObject() // 被重定向到登录页
             val text = (if (code >= 400) connection.errorStream else connection.inputStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
             val json = try { JSONObject(text) } catch (_: Exception) { JSONObject() }
+            // 读完回复后不断开：连接留着给下一次用，省掉每次重新握手（信号差时握手最慢）
             return code to json
-        } finally {
+        } catch (e: IOException) {
             connection.disconnect()
+            throw e
         }
     }
 }

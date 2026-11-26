@@ -5,10 +5,12 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
@@ -61,6 +63,8 @@ class NativeRecordingService : Service() {
     private var nativeStatus: JSONObject? = null
     private var foreground = false
     private lateinit var wakeLock: PowerManager.WakeLock
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var wakeRenewedAt = 0L
     private lateinit var floating: FloatingWindow
     private lateinit var recorder: NativeRecorder
     private val main = Handler(Looper.getMainLooper())
@@ -78,6 +82,14 @@ class NativeRecordingService : Service() {
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jst:meeting")
             .apply { setReferenceCounted(false); acquire(MAX_WAKE_MS) }
+        wakeRenewedAt = SystemClock.elapsedRealtime()
+        // 锁屏后 Wi-Fi 会进省电模式，上传变得很慢、经常超时：开会期间让它保持全速
+        wifiLock = try {
+            @Suppress("DEPRECATION")
+            applicationContext.getSystemService(WifiManager::class.java)
+                ?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "jst:meeting-upload")
+                ?.apply { setReferenceCounted(false) }
+        } catch (e: RuntimeException) { null }
         recorder = NativeRecorder(this) { status -> main.post { onRecorderStatus(status) } }
     }
 
@@ -137,17 +149,29 @@ class NativeRecordingService : Service() {
         nativeStatus = status
         when (val state = status.optString("state")) {
             "recording", "paused", "saving" -> {
+                keepAwake()
                 phase = state
                 startedAt = status.optLong("startedAt", startedAt)
                 render()
             }
             "done", "failed" -> if (foreground) {
                 // 界面开着时由它确认；界面不在时，留一条结果通知再退出
+                try { wifiLock?.takeIf { it.isHeld }?.release() } catch (_: RuntimeException) { }
                 if (!appVisible) notifyResult(status)
                 main.postDelayed({ if (!recorder.busy) stopNow() }, 1_500)
             }
             "idle" -> if (foreground && !recorder.active) stopNow()
         }
+    }
+
+    /** 会议不限时长：唤醒锁每次只拿 2 小时（防止意外一直不放），开会期间隔一阵续一次。 */
+    private fun keepAwake() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - wakeRenewedAt > 10 * 60 * 1000L || !wakeLock.isHeld) {
+            wakeLock.acquire(MAX_WAKE_MS)
+            wakeRenewedAt = now
+        }
+        try { wifiLock?.takeIf { !it.isHeld }?.acquire() } catch (_: RuntimeException) { }
     }
 
     private fun render() {
@@ -238,6 +262,7 @@ class NativeRecordingService : Service() {
     override fun onDestroy() {
         floating.refresh(false, phase, startedAt)
         if (wakeLock.isHeld) wakeLock.release()
+        try { wifiLock?.takeIf { it.isHeld }?.release() } catch (_: RuntimeException) { }
         super.onDestroy()
     }
 

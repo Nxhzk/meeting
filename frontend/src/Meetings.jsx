@@ -498,7 +498,7 @@ function Workspace({ config }) {
     }
 
     const liveState = !active ? '会议已结束' : isEnding ? '正在保存最后一段录音'
-        : `${liveLabels[active.phase] || '状态待更新'}${active.meeting_ends_at ? ` · ${timeFormat.format(new Date(active.meeting_ends_at))} 自动结束` : ''}`;
+        : `${liveLabels[active.phase] || '状态待更新'}${active.meeting_ends_at && new Date(active.meeting_ends_at) - Date.now() < 30 * 60 * 1000 ? ` · ${timeFormat.format(new Date(active.meeting_ends_at))} 自动结束` : ''}`;
     const detailCard = data.cards.find(card => card.id === route.detail);
     // 小助理里点开的会议盖在对话上面：返回时对话原样还在（滚动位置不变）
     const overAssistant = route.tab === 'meetings' && Boolean(route.detail) && route.origin === 'assistant';

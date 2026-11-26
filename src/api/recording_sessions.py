@@ -64,7 +64,7 @@ from werkzeug.datastructures import FileStorage
 from src.database import db
 from src.models import RecordingSession, Recording, User, RECORDING_SESSION_STATUSES
 from src.models.recording_session import (
-    MEETING_MAX_SECONDS, MEETING_UPLOAD_GRACE_SECONDS, MEETING_EMPTY_START_GRACE_SECONDS,
+    MEETING_MAX_SECONDS, MEETING_UPLOAD_GRACE_SECONDS, MEETING_LATE_UPLOAD_IDLE_SECONDS, MEETING_EMPTY_START_GRACE_SECONDS,
     MEETING_REMOTE_STOP_GRACE_SECONDS, MEETING_STOP_METADATA_KEY,
 )
 from src.services.job_queue import job_queue
@@ -361,6 +361,21 @@ def _meeting_upload_cutoff():
     return datetime.utcnow() - timedelta(seconds=MEETING_MAX_SECONDS + MEETING_UPLOAD_GRACE_SECONDS)
 
 
+def _meeting_idle_cutoff():
+    return datetime.utcnow() - timedelta(seconds=MEETING_LATE_UPLOAD_IDLE_SECONDS)
+
+
+def _meeting_accepts_uploads(session):
+    """会议过了最长时长仍收补传：手机还在传积压的分段，就等它传完。"""
+    return session.created_at > _meeting_upload_cutoff() or session.last_seen_at > _meeting_idle_cutoff()
+
+
+def _meeting_accepts_uploads_clause():
+    from sqlalchemy import or_
+    return or_(RecordingSession.created_at > _meeting_upload_cutoff(),
+               RecordingSession.last_seen_at > _meeting_idle_cutoff())
+
+
 def _chunk_session_closed(session):
     if session is None:
         return jsonify(api_error('session_not_found')), 404
@@ -501,7 +516,7 @@ def upload_chunk(session_id, chunk_index):
     if err is not None:
         return err
 
-    if session.status != 'recording' or (session.kind == 'meeting' and session.created_at <= _meeting_upload_cutoff()):
+    if session.status != 'recording' or (session.kind == 'meeting' and not _meeting_accepts_uploads(session)):
         return _chunk_session_closed(session)
 
     expected_index = session.chunk_count + 1
@@ -566,7 +581,7 @@ def upload_chunk(session_id, chunk_index):
         claimed = db.session.query(RecordingSession).filter(
             RecordingSession.id == session_id,
             RecordingSession.status == 'recording',
-            RecordingSession.created_at > _meeting_upload_cutoff(),
+            _meeting_accepts_uploads_clause(),
             RecordingSession.chunk_count == chunk_index - 1,
         ).update({
             'chunk_count': chunk_index,
@@ -576,7 +591,7 @@ def upload_chunk(session_id, chunk_index):
         if not claimed:
             db.session.rollback()
             session = db.session.get(RecordingSession, session_id)
-            if session and session.status == 'recording' and session.created_at > _meeting_upload_cutoff():
+            if session and session.status == 'recording' and _meeting_accepts_uploads(session):
                 return jsonify({**api_error('chunk_out_of_order'),
                                 'expected_chunk_index': session.chunk_count + 1,
                                 'got': chunk_index}), 409
@@ -1026,8 +1041,9 @@ def cleanup_due_meetings(app):
         empty_cutoff = now - timedelta(seconds=MEETING_EMPTY_START_GRACE_SECONDS)
         hour_cutoff = _meeting_upload_cutoff()
         stop_cutoff = now - timedelta(seconds=MEETING_REMOTE_STOP_GRACE_SECONDS)
+        idle_cutoff = _meeting_idle_cutoff()
         meetings = RecordingSession.query.filter_by(kind='meeting', status='recording').filter(or_(
-            RecordingSession.created_at <= hour_cutoff,
+            and_(RecordingSession.created_at <= hour_cutoff, RecordingSession.last_seen_at <= idle_cutoff),
             and_(RecordingSession.chunk_count == 0, RecordingSession.bytes_received == 0,
                  RecordingSession.last_seen_at <= empty_cutoff),
             RecordingSession.finalize_metadata.isnot(None),
@@ -1035,7 +1051,7 @@ def cleanup_due_meetings(app):
         for meeting in meetings:
             session_id = meeting.id
             stop_at = meeting.meeting_stop_requested_at
-            end_due = meeting.created_at <= hour_cutoff or (stop_at is not None and stop_at <= stop_cutoff)
+            end_due = (meeting.created_at <= hour_cutoff and meeting.last_seen_at <= idle_cutoff) or (stop_at is not None and stop_at <= stop_cutoff)
             if not end_due and (meeting.chunk_count or meeting.bytes_received or meeting.last_seen_at > empty_cutoff or stop_at):
                 continue
             try:

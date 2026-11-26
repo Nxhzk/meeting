@@ -50,7 +50,9 @@ export function SettingsPage({ config, locked }) {
             <ul className="note-list" style={{ padding: '0 0 0 18px' }}>
                 <li>开始前请告知参会者。{config.transcriptionPending ? '目前仅保存录音，不转写。'
                     : config.summaryReady ? '录音和文字由云服务处理，会议助手会生成摘要和注意事项。' : '录音将由云服务转成文字，暂不生成摘要。'}</li>
-                <li>会议满 1 小时自动结束。</li>
+                <li>会议不限时长，你点结束才结束（连续录满 12 小时会自动保存，防止忘了关）。</li>
+                <li>{meetingApp ? '录音先存在手机上，再陆续传到服务器。断网、信号差都不会丢，联网后自动补传；会议结束后请等「正在保存」完成再关 App。'
+                    : '录音先存在浏览器里再上传，断网后恢复会自动补传。'}</li>
                 <li>{meetingApp ? '后台录音请保持麦克风和通知权限。小米、华为、OPPO、vivo 等手机建议关闭应用的电池限制。'
                     : '手机录音请用 Safari 或 Chrome 打开，并保持页面亮屏。'}</li>
                 <li>如果系统暂停收音，回到本页会尝试自动接着录；暂停期间的声音不会被录下。</li>
