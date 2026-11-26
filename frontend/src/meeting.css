@@ -792,9 +792,15 @@ html.sheet-open .page-stack, html.sheet-open .split-list, html.sheet-open .compa
 .boot-splash-text { color: var(--label-2); font-size: 15px; letter-spacing: .02em; animation: boot-fade 1s ease .6s both; }
 @keyframes boot-fade { from { opacity: 0; } to { opacity: 1; } }
 
-/* 小助理语音输入：按住说话 */
-.composer-btn.voice { background: var(--fill); color: var(--tint); touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-.composer-btn.voice.holding { background: var(--tint); color: #fff; }
+/* 小助理语音模式：输入栏变成「按住说话」，右边的按钮切换键盘/语音 */
+.composer-btn.mode { background: none; color: var(--label); }
+.composer-btn.mode svg { width: 26px; height: 26px; }
+.hold-to-talk { flex: 1; min-width: 0; min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px; border-radius: 19px;
+    font-size: 16px; font-weight: 600; color: var(--label); touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    transition: background .15s, color .15s; }
+.hold-to-talk.holding { background: var(--tint); color: #fff; }
+.hold-to-talk.cancel { background: var(--red); color: #fff; }
+.hold-to-talk:disabled { color: var(--label-2); }
 .voice-overlay { position: fixed; inset: 0; z-index: 70; display: flex; align-items: flex-end; justify-content: center; padding-bottom: calc(var(--safe-bottom) + 110px); background: color-mix(in srgb, var(--bg) 35%, transparent); pointer-events: none; }
 .voice-card { min-width: 220px; padding: 22px 26px 18px; border-radius: 26px; display: grid; justify-items: center; gap: 12px; text-align: center; }
 .voice-card strong { font-size: 15px; font-weight: 600; color: var(--label); }

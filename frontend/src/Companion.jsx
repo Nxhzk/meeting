@@ -4,7 +4,7 @@ import { Icon, Menu, MenuItem, NavButton, Sheet, dayLabel, softSpring, spring, t
 import { chunkHtml, completedChunks, splitReply, typingDelay } from './chat-format.js';
 import { LiquidMark } from './LiquidOrb.jsx';
 import { JstLoader } from './JstMark.jsx';
-import { VoiceButton } from './VoiceInput.jsx';
+import { HoldToTalk } from './VoiceInput.jsx';
 import { apiUrl, request } from './recording/api.js';
 
 /* 小助理：和用户的一条连续对话。
@@ -362,6 +362,14 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
     const [menu, setMenu] = useState(false);
     const [confirmClear, setConfirmClear] = useState(false);
     const [clearing, setClearing] = useState(false);
+    // 输入方式：text 打字 | voice 按住说话（和豆包一样，点按钮切换；记住上次用的）
+    const [inputMode, setInputModeState] = useState(() => { try { return localStorage.getItem('jst-assistant-input') === 'voice' ? 'voice' : 'text'; } catch { return 'text'; } });
+    const setInputMode = mode => {
+        setInputModeState(mode);
+        try { localStorage.setItem('jst-assistant-input', mode); } catch { /* 记不住也能用 */ }
+        if (mode === 'text') requestAnimationFrame(() => field.current?.focus());
+    };
+    const voiceMode = inputMode === 'voice';
     const [creditsOpen, setCreditsOpen] = useState(false);
     const { messages, running, live, credits, unread, loaded, outbox } = companion;
 
@@ -660,23 +668,27 @@ export function CompanionPage({ companion, openMeeting, onBack, onGrab, meetingB
             </div>
         </div>
 
-        <form ref={composerRef} className="composer glass glass-strong" onSubmit={event => { event.preventDefault(); send(); }}>
-            <textarea ref={field} rows={1} value={text} placeholder="问问小助理…"
-                onChange={event => { setText(event.target.value); resize(); }}
-                onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />
+        <form ref={composerRef} className={`composer glass glass-strong${voiceMode ? ' voice-mode' : ''}`} onSubmit={event => { event.preventDefault(); send(); }}>
+            {voiceMode
+                ? <HoldToTalk blockedReason={meetingBusy ? '正在开会录音，麦克风被占用，会议结束后再用语音输入。' : ''}
+                    onError={message => toast(message, 'bad')}
+                    onText={spoken => send(text.trim() ? `${text} ${spoken}` : spoken)} />
+                : <textarea ref={field} rows={1} value={text} placeholder="问问小助理…"
+                    onChange={event => { setText(event.target.value); resize(); }}
+                    onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />}
             <AnimatePresence mode="popLayout" initial={false}>
-                {running && (!live.waiting || live.queue != null) && !text.trim()
-                    ? <motion.button key="stop" type="button" className="composer-btn stop" aria-label={stopping ? '正在停止' : '停止'} onClick={stop} disabled={stopping}
+                {running && (!live.waiting || live.queue != null) && (voiceMode || !text.trim())
+                    && <motion.button key="stop" type="button" className="composer-btn stop" aria-label={stopping ? '正在停止' : '停止'} onClick={stop} disabled={stopping}
                         initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
-                        <Icon name="stop" /></motion.button>
-                    : text.trim()
-                        ? <motion.button key="send" type="submit" className="composer-btn" aria-label="发送"
-                            initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
-                            <Icon name="up" /></motion.button>
-                        // 输入框是空的：按住说话（开会录音时麦克风被占着，不能用）
-                        : <VoiceButton key="voice" blockedReason={meetingBusy ? '正在开会录音，麦克风被占用，会议结束后再用语音输入。' : ''}
-                            onError={message => toast(message, 'bad')}
-                            onText={spoken => { setText(text.trim() ? `${text} ${spoken}` : spoken); requestAnimationFrame(resize); }} />}
+                        <Icon name="stop" /></motion.button>}
+                {!voiceMode && text.trim()
+                    ? <motion.button key="send" type="submit" className="composer-btn" aria-label="发送"
+                        initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
+                        <Icon name="up" /></motion.button>
+                    : <motion.button key={voiceMode ? 'keyboard' : 'voice'} type="button" className="composer-btn mode"
+                        aria-label={voiceMode ? '切换到键盘输入' : '切换到语音输入'} onClick={() => setInputMode(voiceMode ? 'text' : 'voice')}
+                        initial={{ scale: .5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }} transition={spring}>
+                        <Icon name={voiceMode ? 'keyboard' : 'voice'} /></motion.button>}
             </AnimatePresence>
         </form>
 

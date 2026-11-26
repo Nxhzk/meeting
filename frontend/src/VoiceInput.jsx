@@ -1,9 +1,8 @@
-/* 小助理的语音输入：按住说话，松开识别，上滑取消（和微信一样）。
-   录一段短语音 → 发给服务器（/api/assistant/transcribe）→ 识别出的文字放进输入框，看一眼再发。 */
+/* 小助理的语音模式（和豆包一样）：输入栏变成一整条「按住说话」，松开识别后直接发出，上滑取消。
+   录一段短语音 → 发给服务器（/api/assistant/transcribe）→ 识别出的文字交给 onText（直接发送）。 */
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { createPortal } from 'react-dom';
-import { Icon } from './ui.jsx';
 import { JstLoader } from './JstMark.jsx';
 import { request } from './recording/api.js';
 
@@ -17,7 +16,7 @@ function pickType() {
     return TYPES.find(type => MediaRecorder.isTypeSupported?.(type)) ?? '';
 }
 
-export function VoiceButton({ disabled, blockedReason, onText, onError, onBusy }) {
+export function HoldToTalk({ disabled, blockedReason, onText, onError, onBusy }) {
     const [phase, setPhase] = useState('idle');     // idle | starting | recording | recognizing
     const [cancel, setCancel] = useState(false);
     const [elapsed, setElapsed] = useState(0);
@@ -123,14 +122,13 @@ export function VoiceButton({ disabled, blockedReason, onText, onError, onBusy }
     const holding = phase === 'starting' || phase === 'recording';
     const seconds = Math.floor(elapsed / 1000);
     return <>
-        <motion.button type="button" className={`composer-btn voice${holding ? ' holding' : ''}`} aria-label="按住说话"
+        <button type="button" className={`hold-to-talk${holding ? ' holding' : ''}${cancel ? ' cancel' : ''}`} aria-label="按住说话"
             disabled={disabled || phase === 'recognizing'}
             onPointerDown={begin} onPointerMove={move} onPointerUp={() => finish()} onPointerCancel={() => { if (session.current) session.current.cancel = true; finish(); }}
-            onContextMenu={event => event.preventDefault()}
-            initial={{ scale: .5, opacity: 0 }} animate={{ scale: holding ? 1.15 : 1, opacity: 1 }} exit={{ scale: .5, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 500, damping: 30 }}>
-            {phase === 'recognizing' ? <JstLoader size={20} tone="current" /> : <Icon name="mic" />}
-        </motion.button>
+            onContextMenu={event => event.preventDefault()}>
+            {phase === 'recognizing' ? <><JstLoader size={18} tone="current" />正在识别…</>
+                : holding ? (cancel ? '松开 取消' : '松开 发送') : '按住说话'}
+        </button>
         {createPortal(<AnimatePresence>
             {holding && <motion.div key="voice" className={`voice-overlay${cancel ? ' cancel' : ''}`} role="status"
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: .15 }}>
@@ -139,7 +137,7 @@ export function VoiceButton({ disabled, blockedReason, onText, onError, onBusy }
                         : <div className="voice-bars" aria-hidden="true">
                             {[.55, .8, 1, .8, .55].map((k, i) => <span key={i} style={{ transform: `scaleY(${.18 + Math.min(1, level * k * 1.6) * .82})` }} />)}
                         </div>}
-                    <strong>{cancel ? '松开手指，取消发送' : phase === 'starting' ? '正在打开麦克风…' : '松开 识别，上滑 取消'}</strong>
+                    <strong>{cancel ? '松开手指，取消发送' : phase === 'starting' ? '正在打开麦克风…' : '松开 发送，上滑 取消'}</strong>
                     {phase === 'recording' && <span className="voice-time">{seconds >= 50 ? `还能说 ${Math.max(0, 60 - seconds)} 秒` : `0:${String(seconds).padStart(2, '0')}`}</span>}
                 </motion.div>
             </motion.div>}
